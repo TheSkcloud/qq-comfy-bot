@@ -1,0 +1,163 @@
+{
+  "66": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "miaomiaoHarem_29BBETA11.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "62": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    }
+  },
+  "63": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    }
+  },
+  "67": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "masterpiece, best quality, very aesthetic, highres, newest, detailed illustration, hand-drawn 2d anime illustration, soft shading, delicate colored outlines, (@ningen mame:1.9), (@meme50:2.1), (@rurudo:1.9), (@piratescat01:1.6), 1woman, solo, mature adult woman, white hair, blue eyes, long hair, one side up, hair between eyes, rabbit hair ornament, heart hair ornament, hairclip, white collared blouse, blue ribbon bow, pink cardigan tied around waist, wrist scrunchie, yellow wristwatch, indoors, sitting at a table in a bubble tea shop, upper body, three-quarter view, both hands holding a smartphone above the table, looking up at viewer, gentle smile, warm ambient light, soft cool shadows on white fabric, subtle blush, detailed hair strands, varied fabric folds, blurred background, foreground in focus, scnr",
+      "clip": [
+        "62",
+        0
+      ]
+    }
+  },
+  "71": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "worst quality, low quality, score_1, score_2, score_3, artist name, text, error, cropped, blurry subject, overlighting, overexposure, glowing edges, body markings, tattoo, 3d, cgi, 3d render, plastic doll, waxy skin, photorealistic, malformed hands, extra fingers",
+      "clip": [
+        "62",
+        0
+      ]
+    }
+  },
+  "68": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1536,
+      "batch_size": 1
+    }
+  },
+  "69": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "shift": 3.0,
+      "model": [
+        "152",
+        0
+      ]
+    }
+  },
+  "70": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 663769414159516,
+      "steps": 36,
+      "cfg": 5.0,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": [
+        "69",
+        0
+      ],
+      "positive": [
+        "67",
+        0
+      ],
+      "negative": [
+        "71",
+        0
+      ],
+      "latent_image": [
+        "68",
+        0
+      ]
+    }
+  },
+  "65": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "70",
+        0
+      ],
+      "vae": [
+        "63",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "AnimeLab/v7_scenery05",
+      "images": [
+        "182",
+        0
+      ]
+    }
+  },
+  "180": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "RealESRGAN_x4plus_anime_6B.pth"
+    }
+  },
+  "181": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+      "upscale_model": [
+        "180",
+        0
+      ],
+      "image": [
+        "65",
+        0
+      ]
+    }
+  },
+  "182": {
+    "class_type": "ImageScaleBy",
+    "inputs": {
+      "upscale_method": "lanczos",
+      "scale_by": 0.5,
+      "image": [
+        "181",
+        0
+      ]
+    }
+  },
+  "151": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "66",
+        0
+      ],
+      "lora_name": "Scenery_enchancer-Anima-P3.safetensors",
+      "strength_model": 0.5
+    }
+  },
+  "152": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "model": [
+        "151",
+        0
+      ],
+      "lora_name": "rendering_detailer_base10-000400.safetensors",
+      "strength_model": 0.25
+    }
+  }
+}

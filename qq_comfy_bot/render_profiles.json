@@ -1,0 +1,26 @@
+{
+  "life": {
+    "reference": false,
+    "steps": 24,
+    "cfg": 5.0,
+    "width": 640,
+    "height": 960,
+    "upscale": false
+  },
+  "comfort": {
+    "reference": false,
+    "steps": 20,
+    "cfg": 4.5,
+    "width": 576,
+    "height": 832,
+    "upscale": false
+  },
+  "comic": {
+    "reference": false,
+    "steps": 20,
+    "cfg": 4.5,
+    "width": 576,
+    "height": 832,
+    "upscale": false
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "proactive_enabled": true,
+  "romance_mode": "slow",
+  "spontaneous_images": true,
+  "reactions": true,
+  "image_chat": true,
+  "notes_auto": true,
+  "image_chat_interval": 5,
+  "image_chat_max": 4,
+  "drawing": {
+    "initiative": 0.8,
+    "daily_budget": 18,
+    "cooldown_minutes": 20,
+    "comfort": 0.8,
+    "comic": 0.85,
+    "quiet_start": 23,
+    "quiet_end": 8,
+    "timezone": "Asia/Shanghai",
+    "qa_enabled": true,
+    "qa_daily_budget": 120,
+    "freshness_minutes": 20,
+    "task_ttl_seconds": 600,
+    "qa_exhausted_policy": "withhold",
+    "kind_limits": {
+      "life": {
+        "daily_budget": 12,
+        "cooldown_minutes": 20
+      },
+      "comfort": {
+        "daily_budget": 6,
+        "cooldown_minutes": 15
+      },
+      "comic": {
+        "daily_budget": 6,
+        "cooldown_minutes": 10
+      }
+    },
+    "queue_limit": 6,
+    "generation_retries": 1,
+    "life_candidates_per_day": 20,
+    "life_min_interval_minutes": 20,
+    "life_inactive_min_minutes": 5,
+    "life_contact_window_days": 14,
+    "share_interval_minutes": 8,
+    "planning_daily_budget": 60,
+    "qa_unavailable_policy": "withhold"
+  },
+  "reply_timing": {
+    "characters_per_second": 7.0,
+    "typing_min": 0.65,
+    "typing_max": 14.0,
+    "reading_max": 7.0,
+    "jitter": 0,
+    "collection_min": 0.35,
+    "collection_max": 0.85,
+    "segment_max": 5.0,
+    "segment_gap_min": 0.35,
+    "segment_gap_max": 1.1
+  },
+  "thinking_after_substantive_turns": 4
+}
