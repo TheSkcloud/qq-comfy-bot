@@ -45,12 +45,13 @@ class BriefTests(unittest.TestCase):
             'identity':'black hair, brown eyes', 'outfit':'beige cardigan, white top', 'setting':'home desk, books',
             'action':'sorting books', 'composition':'side view, upper body'}}
 
-    def test_same_outfit_and_setting_keep_vocabulary_while_action_changes(self):
+    def test_identity_and_outfit_stay_stable_but_new_subscene_takes_priority(self):
         assemble(self.session, self.data)
-        self.data['visual_scene'].update(identity='blonde hair',outfit='blue dress', setting='beach', action='holding a book')
+        self.data['visual_scene'].update(identity='blonde hair',outfit='blue dress', setting='home kitchen, stove', action='holding a book')
         prompt = assemble(self.session, self.data)
         self.assertIn('beige cardigan', prompt)
-        self.assertIn('home desk', prompt)
+        self.assertIn('home kitchen', prompt)
+        self.assertNotIn('home desk',prompt)
         self.assertIn('holding a book', prompt)
         self.assertIn('black hair', prompt)
         self.assertNotIn('blue dress', prompt)
@@ -60,10 +61,10 @@ class BriefTests(unittest.TestCase):
     def test_explicit_wardrobe_change_invalidates_only_outfit(self):
         assemble(self.session,self.data)
         self.data['state']['clothing'] = '蓝色连衣裙'
-        self.data['visual_scene'].update(outfit='blue dress',setting='incorrect new location')
+        self.data['visual_scene'].update(outfit='blue dress',setting='home kitchen, stove')
         prompt = assemble(self.session,self.data)
         self.assertIn('blue dress',prompt)
-        self.assertIn('home desk',prompt)
+        self.assertIn('home kitchen',prompt)
         self.assertNotIn('beige cardigan',prompt)
 
     def test_different_character_does_not_inherit_previous_clothes(self):

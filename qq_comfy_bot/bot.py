@@ -31,6 +31,9 @@ import image_workflow
 import shot_director
 import dialogue_depth
 import image_progress
+import image_requests
+import delivery_state
+import image_mode
 import image_concept
 from gpu_memory_manager import GPUManager
 from image_errors import ImageFailure
@@ -40,6 +43,7 @@ from visual_brief import validate_brief, cache_context, assemble, complete_from_
 from workflow_validation import validate_graph
 from image_policy import image_requested, visual_request_context, picture_count, allow_spontaneous, scene_tags
 from context_engine import ContextEngine, is_owner
+import schedule
 from plugins.onenote import read_notes, format_notes
 
 ROOT = Path(__file__).resolve().parent
@@ -51,7 +55,7 @@ def response_delay(read_length, reply_length, elapsed):
     return max(0.0, min(12.0, max(0.8, read_length * 0.055 + reply_length * 0.11)) - elapsed)
 FIELDS = ('character', 'clothing', 'location')
 LEGACY_WARM_CHARACTER='铃木羽那（Suzuki Hana），偶像大师 闪耀色彩，18岁，蓝紫色长发、金色眼睛，温柔开朗'
-DEFAULT = dict(character='铃木羽那（Suzuki Hana），偶像大师 闪耀色彩，18岁，蓝紫色长发、金色眼睛，初识冷淡克制、有边界感，熟悉后逐渐放松', clothing='舒适自然的日常服装', location='根据现实时间自然安排的虚拟日常场景')
+DEFAULT = dict(character='铃木羽那（Suzuki Hana），偶像大师 闪耀色彩，18岁，蓝紫色长发、金色眼睛，初识冷淡克制、有边界感，熟悉后逐渐放松', clothing='舒适自然的日常服装', location='根据现实时间和天气自然安排的日常场景')
 OLD_DEFAULT = dict(character='星井美希，成年角色，金发绿眼、长发、呆毛，性格开朗亲切', clothing='蓝色衬衫、蓝色裙子、黄色帽子、白色连裤袜、挎包', location='安静的城市街道')
 
 def daily_appearance(day, character):
@@ -73,8 +77,12 @@ HELP = '''可以直接和我聊天，例如：换一件白色连衣裙，去海�
 /地点 场景描述
 /拍照 [动作、构图或表情]
 /状态 查看设定与现实时间
+/进度 查看最近图片任务（不调用模型、不重复生成）
+/取图 领取重启后找到的原图（先检查，不重新生成）
 /时间 查看程序实时读取的北京时间
 /笔记 [关键词] 只读查询本机 OneNote
+/天气 查看今日缓存的尖草坪天气
+/课表 查看今天的课程与教学周
 /档案 查看你明确说过的基本信息
 /忘记 完整条目内容
 /更正 原条目 => 新条目
@@ -122,22 +130,17 @@ def visual_prompt(tags, hour, appearance='', mood='natural gentle expression', c
 
 
 
-class Store:
+from session_store import SessionStore
+
+class Store(SessionStore):
     def __init__(self, path):
-        self.db = sqlite3.connect(path)
-        self.db.execute('CREATE TABLE IF NOT EXISTS sessions (key TEXT PRIMARY KEY, value TEXT)')
+        super().__init__(path,dict(state=DEFAULT.copy(),history=[]))
 
     def get(self, key):
-        row = self.db.execute('SELECT value FROM sessions WHERE key=?', (key,)).fetchone()
-        value=json.loads(row[0]) if row else dict(state=DEFAULT.copy(), history=[])
+        value=super().get(key)
         if value['state'].get('character')==LEGACY_WARM_CHARACTER:
             value['state']['character']=DEFAULT['character']
         return value
-
-    def save(self, key, value):
-        self.db.execute('INSERT OR REPLACE INTO sessions VALUES (?,?)',
-                        (key, json.dumps(value, ensure_ascii=False)))
-        self.db.commit()
 
 
 def convert(workflow, info):
@@ -318,11 +321,11 @@ class Comfy:
                 raise ImageFailure('service_not_ready' if stage=='service' else 'workflow_invalid' if stage=='workflow' else 'generation_failed',stage,str(exc)) from exc
 
 
-async def deepseek(http, state, history, user, force_image=False, context='', media=None,depth=None):
+async def deepseek(http, state, history, user, force_image=False, context='', media=None,depth=None,contract_profile=None):
     preparation_started=time.monotonic()
     current = now()
-    from chat_contract import SYSTEM,persona_text
-    system_base=SYSTEM
+    from chat_contract import system as contract_system,persona_text
+    system_base=contract_system(contract_profile or 'full',force_image)
     persona_path=Path(__file__).with_name('persona.md')
     if persona_path.exists():system_base+='\n'+persona_text(persona_path)
     system_base+='\n'+conversation_direction(user,history)
@@ -420,7 +423,7 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
                     repaired.raise_for_status();value=await repaired.json()
                 payload=response_plan.decode(value['choices'][0]['message']['content'],False)
                 safe=response_plan.normalize({'reply':payload.get('reply',''),'state':{},'send_image':False,'visual_tags':'',
-                    'dialogue_update':payload.get('dialogue_update',{})},state,user,False)
+                    'dialogue_update':payload.get('dialogue_update',{})},state,user,False,allow_local_memory=False)
                 safe.update(_thinking_enabled=True,_thinking_stage=depth['stage'],_text_only_recovery=True,
                     _model_format='thinking_final_body_recovered',image_value={'veto':True},
                     _stage_times={'prompt_build_ms':preparation_ms,'api_ms':round((recovery_started-api_started)*1000),
@@ -441,7 +444,7 @@ async def repair_grounding(http,data,user,history,url,issues):
     started=time.monotonic()
     result['_grounding_repair']={'issues':issues,'draft':data['reply'],'applied':False}
     body={'model':os.getenv('DEEPSEEK_MODEL','deepseek-flash'),'thinking':{'type':'disabled'},'response_format':{'type':'json_object'},'max_tokens':400,
-          'messages':[{'role':'system','content':'只修正虚拟角色中文聊天正文，输出JSON {"reply":"正文"}。保持冷淡克制的口吻。根据用户资料给自己的反应，不提问、不嘘寒问暖。若问题是重要事件只回嗯，补成一句具体而简短的态度，不复述一段。若问题是未提供原因，删去未给出的评审、导师、资源、名额或当场表现，不补另一种猜测，原因未知就承认未知。不把短回复强行变长。'},
+        'messages':[{'role':'system','content':'只修正虚拟角色中文聊天正文，输出JSON {"reply":"正文"}。保持冷淡克制的口吻。根据用户资料给自己的反应，不提问、不嘘寒问暖。若问题是重要事件只回嗯，补成一句具体而简短的态度，不复述一段。删去没有原话依据的熬夜、准备时长等用户过往经历，保留对当前成绩的反应，不把祝贺改成原因未知。若问题是未提供原因，删去未给出的评审、导师、资源、名额或当场表现，不补另一种猜测，原因未知就承认未知。不把短回复强行变长。'},
                       {'role':'user','content':json.dumps({'recent_user_messages':[m['content'] for m in history[-6:] if m.get('role')=='user'],'message':user,'draft':data['reply'],'issues':issues},ensure_ascii=False)}]}
     try:
         async with http.post(url,json=body,headers={'Authorization':'Bearer '+os.environ['DEEPSEEK_API_KEY']}) as response:
@@ -449,12 +452,13 @@ async def repair_grounding(http,data,user,history,url,issues):
         reply=json.loads(raw['choices'][0]['message']['content']).get('reply','')
         import social_reasoning
         if not isinstance(reply,str) or not reply.strip() or social_reasoning.grounding_issues(reply,user,history):
-            reply='具体缘由我还不清楚。'
+            reply=social_reasoning.safe_grounded_reply(data['reply'],user,history)
         result['reply']=reply
         result['response_plan']={**result['response_plan'],'segments':[reply]}
         result['_grounding_repair']['applied']=True
     except (aiohttp.ClientError,asyncio.TimeoutError,ValueError,KeyError,TypeError,IndexError):
-        result['reply']='具体缘由我还不清楚。'
+        import social_reasoning
+        result['reply']=social_reasoning.safe_grounded_reply(data['reply'],user,history)
         result['response_plan']={**result['response_plan'],'segments':[result['reply']]}
         result['_grounding_repair']['fallback']=True
     result.setdefault('_stage_times',{})['grounding_repair_ms']=round((time.monotonic()-started)*1000)
@@ -528,11 +532,19 @@ class Bot:
             return
         try:
             item={'event':event,'at':now().isoformat(timespec='seconds'),'conversation':hashlib.sha256(ticket.key.encode()).hexdigest()[:12],
-                  'version':ticket.version,'packets':ticket.packets,'elapsed_seconds':round(time.monotonic()-ticket.started,3),**fields}
+                  'version':ticket.version,'input_batch_id':ticket.input_batch_id,'reply_id':f'{hashlib.sha256(ticket.key.encode()).hexdigest()[:12]}:{ticket.version}:{round(ticket.started*1000)}','origin':'user_reply','packets':ticket.packets,'elapsed_seconds':round(time.monotonic()-ticket.started,3),**fields}
             with (ROOT/'data'/'delivery_metrics.jsonl').open('a',encoding='utf-8') as archive:
                 archive.write(json.dumps(item,ensure_ascii=False)+'\n')
         except OSError:
             log.warning('发送时序指标未能保存，聊天继续')
+
+    def background_metric(self,key,event,started,**fields):
+        item={'event':event,'at':now().isoformat(),'conversation':hashlib.sha256(key.encode()).hexdigest()[:12],
+              'elapsed_seconds':round(time.monotonic()-started,3),**fields}
+        try:
+            with (ROOT/'data'/'delivery_metrics.jsonl').open('a',encoding='utf-8') as archive:
+                archive.write(json.dumps(item,ensure_ascii=False)+'\n')
+        except OSError:log.warning('后台时序指标未能保存')
 
     async def call(self, action, params, ws):
         echo = str(uuid.uuid4())
@@ -611,8 +623,8 @@ class Bot:
             dispatch_started=time.monotonic()
             try:
                 acknowledgement=await self.call('send_group_msg' if group else 'send_private_msg',params,self.ws)
-                if image and (not isinstance(acknowledgement,dict) or not acknowledgement.get('message_id')):
-                    raise ImageFailure('qq_ack_missing','send','QQ accepted the request without a message identifier; do not resend')
+                if not isinstance(acknowledgement,dict) or not acknowledgement.get('message_id'):
+                    raise ImageFailure('qq_ack_missing' if image else 'qq_text_ack_missing','send','QQ accepted the request without a message identifier; do not resend')
                 if ticket:
                     ticket.packets += 1
                     self.delivery_metric('sent',ticket,kind='text' if text else 'image',collection_ms=ticket.collection_ms,reading_ms=round(ticket.reading_ms),model_ms=round(ticket.model_ms),typing_ms=round(ticket.typing_ms),send_delay_ms=round((time.monotonic()-send_ready_started)*1000),total_elapsed_ms=round((time.monotonic()-ticket.started)*1000),response_length=len(text or ''),message_count=ticket.message_count,reply_type=ticket.reply_type,segment_count=ticket.segment_count,cancelled=False,sent=True)
@@ -666,12 +678,16 @@ class Bot:
 
     def enqueue(self, event, key, text):
         history=self.store.get(key).get('history',[])
-        explicit_request=image_requested(text,history)
+        request_action=image_requests.classify(text,self.store.get(key),now())
+        explicit_request=request_action['action'] in ('request','amend','confirm','retry')
         instruction=image_director.image_instruction(text,history)
+        if text.strip()=='/重置':instruction='cancel'
+        if request_action['action'] in ('amend','cancel'):instruction=request_action['action']
         if explicit_request and not any(not t.done() for t in getattr(self,'image_warmups',[])):
             warm=asyncio.create_task(self.warm_image_engine())
             self.image_warmups=[warm];self.tasks.add(warm);warm.add_done_callback(self.tasks.discard)
         event={**event,'_queued_at':time.monotonic(),'_explicit_image_request':explicit_request}
+        event['_input_fragments']=[{'id':uuid.uuid4().hex,'text':text,'at':now().isoformat()}]
         self.scheduler.begin(key,len(text))
         if text in ('/取消','取消','停止回复','别回复了'):
             self.inbox.setdefault(key,[]).clear()
@@ -716,16 +732,20 @@ class Bot:
                 event, text = pending.pop(0)
                 event = dict(event)
                 segments = list(event.get('message',[]))
+                fragments=list(event.get('_input_fragments',[]))
                 message_count=1
                 if not text.startswith('/') and not event.get('_explicit_image_request'):
                     while pending and not pending[0][1].startswith('/') and not pending[0][0].get('_explicit_image_request') and len(text)+len(pending[0][1])+1 <= 6000:
                         following, extra = pending.pop(0)
                         segments.extend(following.get('message',[]))
+                        fragments.extend(following.get('_input_fragments',[]))
                         text += '\n' + extra
                         message_count+=1
                 event['message'] = segments
+                event['_input_fragments']=fragments
                 ticket=self.scheduler.current.get(key)
                 if ticket:
+                    event['_input_batch_id']=ticket.input_batch_id
                     ticket.read_length=len(text)
                     ticket.message_count=message_count
                     ticket.collection_ms=round((time.monotonic()-first)*1000)
@@ -760,6 +780,11 @@ class Bot:
             return False
         except Exception as exc:
             image_job=event.get('_pending_image_job')
+            failed_session=self.store.get(key);pending=failed_session.get('pending_turn',{})
+            if pending.get('reply_version')==ticket.version and pending.get('status') in ('prepared','partially_acknowledged'):
+                pending['status']='outcome_unknown' if isinstance(exc,ImageFailure) and exc.code=='qq_text_ack_missing' else 'failed'
+                delivery_state.event(failed_session,'reply_'+pending['status'],now(),input_id=pending.get('id'))
+                self.store.save(key,failed_session)
             if image_job and image_job.data['status']=='received':
                 image_job.record('failed',reason='chat_model_or_context_failed',error=type(exc).__name__,detail=str(exc)[:400],model_response=getattr(exc,'model_response',''))
                 self.image_decision_record(key,{'image_task_id':image_job.id,'status':'failed','reason':'chat_model_or_context_failed'})
@@ -778,6 +803,12 @@ class Bot:
     def reconcile_unsent(self,key,ticket):
         from datetime import timedelta
         session=self.store.get(key);plan=session.get('delivery_plan',{})
+        pending=session.get('pending_turn',{})
+        if pending.get('reply_version')==ticket.version and pending.get('status') in ('prepared','partially_acknowledged'):
+            pending['status']='interrupted'
+            delivery_state.event(session,'reply_interrupted',now(),input_id=pending.get('id'))
+            self.store.save(key,session)
+            plan=session.get('delivery_plan',{})
         if plan.get('version')!=ticket.version:return
         essential=[]
         for segment in plan.get('segments',[]):
@@ -790,6 +821,7 @@ class Bot:
 
     async def respond(self, e, key, text):
         session = self.store.get(key)
+        request_action=image_requests.classify(text,session,now())
         if text.startswith('/') and CURRENT.get():CURRENT.get().pace='fast'
         received_at = now().isoformat(timespec='seconds')
         if speech.EXIT.search(text):
@@ -813,12 +845,30 @@ class Bot:
         self.store.save(key,session)
         command, _, arg = text.partition(' ')
         arg = arg.strip()
-        if text in ('/取消','取消','停止回复','别回复了') or image_director.image_instruction(text)=='cancel':
+        command={'/信息':'/状态','/进度':'/图片进度'}.get(command,command)
+        if command=='/取图':return await self.send_recovered(e,key,session)
+        if request_action['action']=='unbound_confirm':
+            return await self.send(e,'想画哪一张？把画面要求发我，就能接下。')
+        if request_action['action']=='cancel' or text in ('/取消','取消','停止回复','别回复了') or image_director.image_instruction(text)=='cancel':
+            pending=image_requests.latest(session)
+            if pending:
+                pending['cancelled_at']=now().isoformat()
+                self.store.save(key,session)
             if text!='别回复了':
                 await self.send(e,'好，先停下。')
             return
         if command in ('/帮助', '/help', '/bot'):
             return await self.send(e, HELP)
+        if command=='/天气':
+            data=await self.context.weather.ensure(self.http,now())
+            return await self.send(e,data['summary'])
+        if command=='/课表':
+            if e.get('message_type')!='private' or not is_owner(e['user_id']):
+                return await self.send(e,'个人课表只在你的私聊里查看。')
+            data=schedule.today(now())
+            lines=[f"本周第{data['week']}周，今天的课程："]
+            lines += [f"{c['periods']}节 {c['name']}（{c['room']}）" for c in data['courses']]
+            return await self.send(e,'\n'.join(lines or ['今天没有固定课程'])+'\n钟点作息未提供，活动仅作推测。')
         if command=='/档案':
             if e.get('message_type')!='private':
                 return await self.send(e,'个人档案请在私聊里查看。')
@@ -839,7 +889,7 @@ class Bot:
             if arg not in ('开','关'):
                 return await self.send(e,'用 /主动分享 开 或 /主动分享 关。开启后空闲时偶尔分享虚拟生活插画。')
             preferences.save({'proactive_enabled':arg=='开'})
-            return await self.send(e,'已开启空闲时的生活插画分享。' if arg=='开' else '已关闭主动分享。')
+            return await self.send(e,image_mode.description(preferences.load()))
         if command in ('/日程', '/纪念日', '/忘记', '/忘记纪念日', '/相处', '/随手图'):
             if e.get('message_type') != 'private':
                 return await self.send(e, '这些个人设置请在私聊里使用。')
@@ -847,9 +897,10 @@ class Bot:
             if command in ('/相处', '/随手图') and not is_owner(user):
                 return await self.send(e, '全局相处与发图设置只由主人账号调整。')
             if command == '/日程':
+                weather = await self.context.weather.ensure(self.http, now())
                 routine_user = user+':'+character_key(session['state']['character'])
-                await self.context.routine.ensure(self.http, routine_user, now(), session['state']['character'])
-                items = self.context.routine.agenda(routine_user, now())
+                await self.context.routine.ensure(self.http, routine_user, now(), weather, session['state']['character'])
+                items = self.context.routine.agenda(routine_user, now(), weather)
                 return await self.send(e, '今天的虚拟日程（计划可以调整）：\n'+'\n'.join(f'{a:02d}—{b:02d}时 {activity}' for a,b,activity in items))
             if command == '/纪念日':
                 try:
@@ -880,13 +931,16 @@ class Bot:
             if arg not in ('开', '关'):
                 return await self.send(e, '用 /随手图 开 或 /随手图 关；只在聊天中偶尔分享，明确要图不受此开关影响。')
             preferences.save({'spontaneous_images':arg == '开'})
-            return await self.send(e, '已开启聊天中的偶尔分享。' if arg == '开' else '已关闭偶尔分享，仍可随时明确要图。')
+            return await self.send(e,image_mode.description(preferences.load()))
         if command == '/笔记':
             if e.get('message_type') != 'private' or not is_owner(e['user_id']):
                 return await self.send(e, '笔记只在私聊里读取，避免把你的内容发到群里。')
             notes = await read_notes('search' if arg else 'list', arg)
             return await self.send(e, format_notes(notes))
-        if image_progress.is_query(text,session,now()):
+        confirm_active=False
+        if request_action['action']=='confirm':
+            confirm_active=image_progress.snapshot(ROOT,session,key,now(),self.started_at)['status']!='not_started'
+        if command=='/图片进度' or confirm_active or image_progress.is_query(text,session,now()):
             status=image_progress.snapshot(ROOT,session,key,now(),self.started_at)
             if CURRENT.get():CURRENT.get().pace='fast'
             await self.send(e,status['text'])
@@ -906,7 +960,7 @@ class Bot:
             log.info('时间询问由系统时钟直接回答，时区=%s', now().tzinfo)
             return
         if command == '/重置':
-            self.store.save(key, dict(state=DEFAULT.copy(), history=[]))
+            self.store.save(key, dict(state=DEFAULT.copy(), history=[],scene_version=session.get('scene_version',0)+1))
             return await self.send(e, '已恢复默认角色并清空聊天记忆。')
         if command == '/状态':
             s = session['state']
@@ -917,17 +971,20 @@ class Bot:
                 return await self.send(e, '请在指令后加空格，再填写描述。')
             if len(arg) > 2000:
                 return await self.send(e, '设定请控制在 2000 字以内。')
+            if session['state'][changes[command]]!=arg:session['scene_version']=session.get('scene_version',0)+1
             session['state'][changes[command]] = arg
             if command=='/角色':
                 session.pop('scene_hair',None)
                 session.pop('visual_cache',None)
             self.store.save(key, session)
             return await self.send(e, '设定已更新。发 /拍照 就能看看现在的样子。')
+        if text.startswith('/') and command!='/拍照':
+            return await self.send(e,'没有这个指令。发 /帮助 查看可用指令；/状态 查看当前设定，/进度 查看最近图片任务。')
         if session['state'] == OLD_DEFAULT:
             session['state'] = DEFAULT.copy()
             self.store.save(key, session)
         force = command == '/拍照'
-        explicit = image_requested(text,session.get('history',[])) or bool(e.get('_image_amend'))
+        explicit = request_action['action'] in ('request','amend','confirm','retry') or bool(e.get('_image_amend'))
         if explicit:
             task_id=uuid.uuid4().hex
             e['_pending_image_job']=image_director.Job(ROOT/'data'/'image_jobs',{'state':copy.deepcopy(session['state'])},
@@ -937,21 +994,35 @@ class Bot:
             e['_pending_image_job'].data['conversation_id']=hashlib.sha256(key.encode()).hexdigest()[:12]
             e['_pending_image_job'].save()
             session['last_image_job_id']=task_id
+            image_requests.receive(session,request_action,now(),task_id)
+            e['_pending_image_job'].data['source_message']=request_action['text']
+            e['_pending_image_job'].data['request_id']=image_requests.latest(session)['id']
+            e['_pending_image_job'].save()
             self.store.save(key,session)
             self.image_decision_record(key,{'image_task_id':task_id,'status':'received','reason':'explicit_user_request','request_detection':detection})
         request = ('请生成一张你现在的照片。' + arg) if force else text
+        if request_action['action'] in ('amend','confirm','retry'):request=request_action['text']
         if e.get('_image_amend'):
             request='修改上一张图片请求：'+session.get('last_image_request','')+'；本次修改：'+text
-        previous=next((m.get('content','') for m in reversed(session['history']) if m.get('role')=='assistant'),None)
+        fragments=e.get('_input_fragments') or []
+        included={fragment['id'] for fragment in fragments}
+        model_history=[copy.deepcopy(item) for item in session['history'] if item.get('id') not in included]
+        input_id=e.get('_input_batch_id') or (CURRENT.get().input_batch_id if CURRENT.get() else uuid.uuid4().hex)
+        if fragments:
+            for fragment in fragments:delivery_state.receive(session,fragment['text'],datetime.fromisoformat(fragment['at']),fragment['id'])
+        else:delivery_state.receive(session,request,now(),input_id)
+        if e.get('_pending_image_job'):
+            e['_pending_image_job'].data['input_batch_id']=input_id
+            e['_pending_image_job'].save()
+        self.store.save(key,session)
+        previous=next((m.get('content','') for m in reversed(model_history) if m.get('role')=='assistant'),None)
         if e.get('message_type')=='private' and re.fullmatch(r'[嗯哦噢]+[。！!，,～~\s]*',text) and previous is not None and speech.question_count(previous)==0:
             # Acknowledgement after a completed statement may end naturally; no model bill.
-            session['history']=(session['history']+[{'role':'user','content':text,'at':received_at}])[-20:]
-            self.store.save(key,session)
             return
         context_started=time.monotonic()
-        depth=dialogue_depth.plan(session,text,session.get('history',[]),now(),preferences.load().get('thinking_after_substantive_turns',4))
+        depth=dialogue_depth.plan(session,text,model_history,now(),preferences.load().get('thinking_after_substantive_turns',4))
         extra=await self.context.build(self.http,str(e['user_id']),text,now(),e.get('message_type')=='private',character=session['state']['character'],visual_requested=explicit)
-        visual_target=visual_request_context(text,session.get('history',[])) if explicit else {}
+        visual_target=visual_request_context(text,model_history) if explicit else {}
         if explicit:extra+='\n本轮明确索图目标：'+json.dumps(visual_target,ensure_ascii=False)
         extra += '\n'+response_plan.life_context(session,now())
         pending=session.get('pending_essential',{})
@@ -961,6 +1032,8 @@ class Bot:
             else:session.pop('pending_essential',None)
         except (KeyError,ValueError,TypeError):session.pop('pending_essential',None)
         extra += '\n'+image_director.scene_context(session)+'\n'+social_reasoning.context(session)
+        positions=delivery_state.positions_context(session,text)
+        if positions:extra+='\n此前已实际说过的相关观点，可随新依据更正，不当作用户事实：'+json.dumps(positions,ensure_ascii=False)
         self.delivery_metric('context_ready',CURRENT.get(),context_preparation_ms=round((time.monotonic()-context_started)*1000))
         if session.get('last_image_context'):
             extra += '\n最近成功发出的虚拟插画（用户可能在评价画面，不自动重画）：'+json.dumps(session['last_image_context'],ensure_ascii=False)[:1800]
@@ -983,16 +1056,28 @@ class Bot:
             extra += '\n'+fixed_visual+'\n仅在同一套服装或同一地点时沿用；用户明确换装、换地点时重新描述对应部分。'
         tone = self.context.life.mood(str(e['user_id']),{},now()) if e.get('message_type')=='private' else '自然平稳，跟随用户话题。'
         model_started=time.monotonic()
-        data = await deepseek(self.http, session['state'], session['history'], request, explicit, context=extra,media=observation,depth=depth)
+        data = await deepseek(self.http, session['state'], model_history, request, explicit, context=extra,media=observation,depth=depth)
+        if not explicit and image_requests.model_request(text,data):
+            explicit=True
+            request_action={'action':'request','text':text,'evidence':data['image_request']['evidence']}
+            job=image_director.Job(ROOT/'data'/'image_jobs',{'state':copy.deepcopy(session['state'])},
+                {'kind':'explicit','style':'life','priority':0},'',self.activity.get(key,0))
+            job.data.update(conversation_id=hashlib.sha256(key.encode()).hexdigest()[:12],source_message=text,input_batch_id=input_id)
+            item=image_requests.receive(session,request_action,now(),job.id)
+            job.record('received',reason='verified_model_request',request_id=item['id'])
+            e['_pending_image_job']=job
+            self.store.save(key,session)
+            visual_target=visual_request_context(text,session.get('history',[]))
         if explicit and data.get('_model_format_error'):
             e['_pending_image_job'].data.update(main_model_format_error=data['_model_format_error'],main_model_response=data.get('_raw_model_response',''))
             e['_pending_image_job'].save()
         data['_explicit_image_request']=explicit
+        data['_visual_context']=bool(explicit or image_requests.latest(session) or image_progress.recent_visual(session.get('history',[]),now()))
         if explicit:
             data['_image_purpose']=visual_target['purpose']
             data['_visual_request_context']='本轮明确索图目标：'+json.dumps(visual_target,ensure_ascii=False)+'\n最近的视觉话题：'+json.dumps(session.get('history',[])[-4:],ensure_ascii=False)
         image_director.transition(session,data,text,now())
-        self.delivery_metric('model_complete',CURRENT.get(),model_seconds=round(time.monotonic()-model_started,3),thinking=bool(data.get('_thinking_enabled',depth['thinking'])),thinking_stage=depth['stage'],discussion_turns=depth['state'].get('substantive_turns',0),**data.get('_stage_times',{}))
+        self.delivery_metric('model_complete',CURRENT.get(),model_seconds=round(time.monotonic()-model_started,3),thinking=bool(data.get('_thinking_enabled',depth['thinking'])),thinking_stage=depth['stage'],discussion_turns=depth['state'].get('substantive_turns',0),topic_relation=depth['relation'],topic_reason=depth['transition_reason'],**data.get('_stage_times',{}))
         self.scheduler.check(CURRENT.get())
         if observation:
             observation=media_input.finalize(observation,data.get('media_analysis'))
@@ -1009,33 +1094,30 @@ class Bot:
             ticket.segment_count=len(plan['segments'])
             if plan['intent']=='emotion':ticket.pace='emotion'
             elif plan['intent'] in ('acknowledge','closing'):ticket.pace='fast'
-        drawing_tags=assemble(session,data)
-        committed=False
-        def commit(spoken=None):
-            nonlocal committed
-            if not committed:
-                session['state']=data['state']
-                if data.get('_scene_hair'):
-                    session['scene_hair']=data['_scene_hair']
-                if data.get('_scene_changes'):
-                    session['scene_changes']=(session.get('scene_changes',[])+[{'at':now().isoformat(),'changes':data['_scene_changes']}])[-20:]
-                response_plan.update_life(session,data,now())
-                social_reasoning.remember(session,data,now())
-                session['history']=(session['history']+[{'role':'user','content':request,'at':received_at}])[-20:]
-                if observation:
-                    session['last_media']={'at':received_at,**observation}
-                if e.get('message_type')=='private':
-                    self.context.companion.touch(str(e['user_id']),session['state']['character'],now())
-                    self.context.life.record(str(e['user_id']),data.get('memory_updates',[]),text,now())
-                    self.context.life.mood(str(e['user_id']),data.get('affect',{}),now())
-                committed=True
+        # User evidence can be recorded independently of a cancelled assistant reply.
+        if e.get('message_type')=='private':
+            self.context.companion.touch(str(e['user_id']),session['state']['character'],now())
+            memory_counts={}
+            self.context.life.record(str(e['user_id']),data.get('memory_updates',[]),text,now(),diagnostics=memory_counts)
+            self.delivery_metric('memory_extraction',CURRENT.get(),memory_extraction=data.get('_memory_extraction',{'status':'missing'}),memory_result=memory_counts,reply_only_recovery=bool(data.get('_text_only_recovery')))
+        social_reasoning.remember(session,data,now())
+        if observation:session['last_media']={'at':received_at,**observation}
+        delivery_state.stage(session,data,plan,input_id,ticket.version if ticket else 0,now())
+        self.store.save(key,session)
+        affect_committed=False
+        def commit(spoken=None,ack=None,complete=False):
+            nonlocal session,affect_committed
+            session=self.store.get(key)
             if spoken:
+                delivery_state.acknowledge(session,data,dialogue.render_time(spoken,now()),text,ack,now(),complete)
                 if data.get('carry_resolution') in ('included','irrelevant'):session.pop('pending_essential',None)
-                session['history']=(session['history']+[{'role':'assistant','content':dialogue.render_time(spoken,now()),'at':now().isoformat(timespec='seconds')}])[-20:]
+            if complete and not affect_committed and e.get('message_type')=='private':
+                self.context.life.mood(str(e['user_id']),data.get('affect',{}),now())
+                affect_committed=True
             self.store.save(key,session)
-        # Persist the planned scene first, then let GPU work run during text pacing.
-        commit()
-        await self.start_drawing(e,key,request if e.get('_image_amend') else text,session,data,plan,explicit)
+        await self.start_drawing(e,key,request if explicit else text,session,data,plan,explicit)
+        if data.get('_drawing_started'):
+            data['_image_receipt']=image_progress.snapshot(ROOT,session,key,now(),self.started_at)
         plan=image_progress.guard_blocked_reply(plan,data)
         if ticket:ticket.segment_count=len(plan['segments'])
         if plan['mode']=='silent':
@@ -1044,7 +1126,7 @@ class Bot:
                 return
         if plan['mode']=='reaction':
             if await self.send_reaction(e,key,session,data.get('reaction','none'),text):
-                commit('[实际发送了一张表情图片]')
+                commit('[实际发送了一张表情图片]',complete=True)
             else:
                 commit()
             if not explicit:
@@ -1057,24 +1139,35 @@ class Bot:
             acknowledgement=await self.send(e,segment)
             session['delivery_plan']['segments'][index].update(status='sent',qq_result=acknowledgement,at=now().isoformat())
             session['delivery_receipts']=(session.get('delivery_receipts',[])+[{'version':ticket.version if ticket else 0,'segment':index,'state':'sent','qq_result':acknowledgement,'at':now().isoformat()}])[-50:]
-            commit(segment)
+            self.store.save(key,session)
+            commit(segment,acknowledgement,complete=index==len(plan['segments'])-1)
             await self.indicate_typing(e,False)
-        if not committed:
-            commit()
         if plan['mode']=='text' and plan['segments']:
             dialogue_depth.finish(session,text,'\n'.join(plan['segments']),data,depth,now())
             self.store.save(key,session)
         if data.get('_image_failure'):
             notice=self.image_failure_notice(data['_image_failure'])
-            await self.send(e,notice);commit(notice)
+            acknowledgement=await self.send(e,notice);commit(notice,acknowledgement)
+        if data.get('_drawing_deferred') and session['state']==data['state']:
+            data.pop('_drawing_deferred',None)
+            await self.start_drawing(e,key,request if explicit else text,session,data,plan,explicit)
         elif not data.get('_drawing_started'):
             await self.send_reaction(e,key,session,data.get('reaction','none'),text)
 
     async def start_drawing(self,e,key,text,session,data,plan,explicit):
         import social_reasoning
+        directed=all(image_director.user_transition(item['field'],text) for item in data.get('_scene_changes',[]) if item.get('field') in ('clothing','location','hairstyle'))
+        if data['state']!=session['state'] and (not explicit or not directed):
+            data['_drawing_deferred']=True
+            return
+        data['_scene_authorization']={'base_version':session.get('scene_version',0),'state':copy.deepcopy(data['state']),
+            'source':'explicit_user' if explicit and directed else 'acknowledged_scene'}
         # Explicit requests work regardless of auto mode; otherwise images are opt-in.
         auto = os.getenv('IMAGE_MODE', 'off') == 'auto' and not data.get('_text_only_recovery') and not social_reasoning.boundary_blocks(session,text,now())
         settings=preferences.load()
+        if not explicit and image_requests.latest(session) and image_progress.snapshot(ROOT,session,key,now(),self.started_at)['status'] in image_progress.ACTIVE|{'interrupted','outcome_unknown','recovered_output','not_started'}:
+            self.image_decision_record(key,{'allowed':False,'reason':'unresolved_explicit_request'})
+            return
         if not explicit and auto and settings.get('spontaneous_images',True):
             import image_candidates
             candidate_data=data
@@ -1090,7 +1183,7 @@ class Bot:
                 self.store.save(key,session)
                 task=asyncio.create_task(self.prepare_candidate(e,key,candidate,settings,candidate_data))
                 self.tasks.add(task);task.add_done_callback(self.tasks.discard)
-                data['_drawing_started']=True
+                data['_candidate_scheduled']=True
                 return
         decision=image_director.decide(session,text,data,now(),settings['drawing'],auto and settings.get('spontaneous_images',True))
         pending_job=e.get('_pending_image_job')
@@ -1098,6 +1191,7 @@ class Bot:
         if explicit and decision['reason']!='user_declined':
             decision.update(allowed=True,kind='explicit',priority=0,reason='explicit_user_request')
         if pending_job:pending_job.data['decision']=copy.deepcopy(decision)
+        if pending_job:pending_job.data['scene_authorization']=copy.deepcopy(data['_scene_authorization'])
         should_draw=decision['allowed']
         self.image_decision_record(key,decision)
         log.info('图片判定：明确请求=%s，模型建议=%s，自动模式=%s，决定生图=%s', explicit, data['send_image'], auto, should_draw)
@@ -1106,6 +1200,7 @@ class Bot:
             if not explicit and plan.get('intent')=='image_request':
                 self.delivery_metric('image_promise_blocked',CURRENT.get(),reason=decision.get('reason','not_proposed'))
             return
+        image_concept.apply(data)
         if not complete_from_cache(session,data) and not image_concept.needs_plan(data):
             launched=self.launch_image(e,key,text,session,data,decision,settings,explicit,job=pending_job)
             if launched:data['_drawing_started']=True
@@ -1113,6 +1208,7 @@ class Bot:
             return
         # Visual repair is independent of the text reply and its cancellation ticket.
         job=pending_job or image_director.Job(ROOT/'data'/'image_jobs',{'state':copy.deepcopy(session['state'])},decision,'',self.activity.get(key,0))
+        job.data['scene_authorization']=copy.deepcopy(data['_scene_authorization'])
         job.data['creative_brief']=copy.deepcopy(data.get('creative_brief'))
         job.record('planning',reason='creative_or_visual_completion')
         if self.image_load()>=settings['drawing'].get('queue_limit',6):
@@ -1127,12 +1223,19 @@ class Bot:
     def image_load(self):
         return sum(len(q) for q in self.image_queues.values())+len(self.image_active)+len(self.image_planning)
 
+    def image_scene_valid(self,key,scene,job):
+        live=self.store.get(key)
+        if live['state']==scene:return True
+        authorization=job.data.get('scene_authorization',{}) if job else {}
+        return (authorization.get('source')=='explicit_user' and authorization.get('state')==scene
+                and live.get('scene_version',0)==authorization.get('base_version'))
+
     async def prepare_image(self,event,key,text,data,decision,settings,explicit,job,epoch):
         token=CURRENT.set(None)
         timing_token=reply_timing.set(None)
         scene=copy.deepcopy(data['state'])
         def valid():
-            return self.store.get(key)['state']==scene and self.image_epochs.get(key,0)==epoch
+            return self.image_scene_valid(key,scene,job) and self.image_epochs.get(key,0)==epoch
         try:
             from image_planner import complete_visual
             session=self.store.get(key)
@@ -1140,7 +1243,8 @@ class Bot:
             if missing or image_concept.needs_plan(data):
                 job.record('planning',reason='visual_completion',missing_fields=missing,planning_requests=1)
                 url=os.getenv('DEEPSEEK_BASE_URL','https://api.deepseek.com').rstrip('/')+'/chat/completions'
-                visual=await complete_visual(self.http,url,scene,text,cache_context(session)+'\n'+image_concept.context(session,text,data))
+                visual_session={**dict(session),'state':scene}
+                visual=await complete_visual(self.http,url,scene,text,cache_context(visual_session)+'\n'+image_concept.context(visual_session,text,data))
                 data.update(visual)
             job.data['creative_brief']=copy.deepcopy(data.get('creative_brief'));job.save()
             if not valid():raise Superseded()
@@ -1191,24 +1295,45 @@ class Bot:
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'creative_fields_missing'})
             if job:job.record('failed',reason='creative_fields_missing',creative_brief=data.get('creative_brief'))
             return
+        conflicts=image_concept.conflicts(data)
+        if conflicts:
+            data['_image_failure']='visual_scene_conflict'
+            self.image_decision_record(key,{**decision,'allowed':False,'reason':'visual_scene_conflict','conflicts':conflicts})
+            if job:job.record('failed',reason='visual_scene_conflict',conflicts=conflicts)
+            return
         if missing:
             data['_image_failure']='visual_fields_missing'
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'visual_fields_missing','missing_fields':missing})
             if job:job.record('failed',reason='visual_fields_missing',missing_fields=missing)
             return
-        assemble(session,data)
+        drawing_session={**copy.deepcopy(dict(session)),'state':copy.deepcopy(data['state'])}
+        if data.get('_scene_hair'):drawing_session['scene_hair']=data['_scene_hair']
+        candidate=data.get('_candidate') or {}
+        if candidate.get('source_type')=='life':
+            drawing_session['life_state']={'activity':candidate['character_activity'],'phase':'planned','started_at':candidate['created_at'],'expires_at':candidate['expires_at']}
+        assemble(drawing_session,data)
+        if data['state']==session['state']:session['visual_cache']=drawing_session.get('visual_cache',{})
         count = picture_count(text) if explicit else 1
         data['_image_request']=text
-        snapshot=image_director.freeze(session,data,decision,now(),settings['drawing'])
+        snapshot=image_director.freeze(drawing_session,data,decision,now(),settings['drawing'])
+        proposed=data['state']!=session['state'] or any(item.get('field')=='hairstyle' and item.get('to')!=session.get('scene_hair') for item in data.get('_scene_changes',[]))
+        snapshot['scene_base_version']=session.get('scene_version',0)
+        snapshot['scene_version']=session.get('scene_version',0)+int(proposed)
+        snapshot['scene_phase']='proposed' if proposed else 'acknowledged'
+        snapshot['scene_authorization']=copy.deepcopy(data.get('_scene_authorization',{}))
         snapshot['creative_brief']=copy.deepcopy(data['creative_brief'])
         snapshot['setting_tags']=scene_tags(snapshot['setting_tags'],datetime.fromisoformat(snapshot['local_time']).hour,'')
+        snapshot['creative_brief']['environment']=snapshot['setting_tags']
+        snapshot['creative_brief']['atmosphere']=scene_tags(snapshot['creative_brief']['atmosphere'],datetime.fromisoformat(snapshot['local_time']).hour,'')
         if not snapshot['action']:
             data['_image_failure']='missing_english_action'
+            if job:job.record('failed',reason='missing_english_action')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'missing_english_action'});return
         snapshot['shot_plan']=shot_director.choose(snapshot,text,session.get('shot_history',[])+session.get('shot_attempts',[]))
         snapshot['camera']=snapshot['shot_plan']['tags']
         visual_key=image_director.fingerprint([snapshot['location'],snapshot['outfit'],snapshot['action'],snapshot['camera']])
         if not explicit and any(v.get('key')==visual_key for v in session.get('recent_visuals',[])[-2:]):
+            if job:job.record('duplicate_suppressed',reason='repeated_visual')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'repeated_visual'});return
         prompt = visual_prompt(image_director.build_tags(snapshot),datetime.fromisoformat(snapshot['local_time']).hour,
                                '',shot_director.visible_emotion(snapshot),session['state']['character'],frozen=True)
@@ -1220,6 +1345,8 @@ class Bot:
             job.data.update(snapshot=job.snapshot,prompt=prompt)
         else:job=image_director.Job(ROOT/'data'/'image_jobs',snapshot,decision,prompt,self.activity.get(key,0))
         job.data.update(conversation_id=hashlib.sha256(key.encode()).hexdigest()[:12],related_event_id=decision.get('event'),message_version=CURRENT.get().version if CURRENT.get() else None,image_epoch=self.image_epochs.get(key,0))
+        if CURRENT.get():job.data.setdefault('input_batch_id',CURRENT.get().input_batch_id)
+        job.data.setdefault('scene_authorization',copy.deepcopy(data.get('_scene_authorization',{})))
         session['last_image_job_id']=job.id
         job.record('accepted',reason=decision.get('reason','accepted'))
         job.data['candidate']=data.get('_candidate')
@@ -1234,7 +1361,7 @@ class Bot:
             'kind':decision['kind'],'day':snapshot['local_time'][:10],'at':now().isoformat(),'job':job.id}])[-50:]
         session['last_image_request']=text or session.get('last_image_request','')
         self.store.save(key,session)
-        item=dict(event=e,key=key,prompt=prompt,lines=data.get('waiting_lines',[]),scene=session['state'].copy(),activity=self.activity.get(key,0),picture_count=count,job=job)
+        item=dict(event=e,key=key,prompt=prompt,lines=data.get('waiting_lines',[]),scene=data['state'].copy(),activity=self.activity.get(key,0),picture_count=count,job=job)
         self.image_queues.setdefault(key,[]).append(item)
         job.record('queued',reason='bounded_priority_queue')
         self.image_decision_record(key,{**decision,'image_task_id':job.id,'status':'queued'})
@@ -1299,8 +1426,8 @@ class Bot:
             archive.write(json.dumps({'at':now().isoformat(),'session':hashlib.sha256(key.encode()).hexdigest()[:12],**decision},ensure_ascii=False)+'\n')
 
     async def render_live(self, event, key, prompt, lines, scene, activity, picture_count=1,job=None):
+        event={**event,'_image_task_id':job.id if job else None}
         """GPU priority, quality gate and QQ sends share the chat's final delivery lock."""
-        original_ticket=CURRENT.get()
         token=CURRENT.set(None)
         timing_token=reply_timing.set(None)
         cfg=preferences.load()['drawing']
@@ -1324,10 +1451,11 @@ class Bot:
                 limit=settings['drawing'].get('kind_limits',{}).get(kind)
                 if limit and sum(a.get('kind')==kind for a in sends)>=limit['daily_budget']:return False
             initiative_ok=not (job and job.data.get('initiative')) or (preferences.load().get('proactive_enabled',False) and preferences.load().get('spontaneous_images',True) and (not live.get('busy_until') or datetime.fromisoformat(live['busy_until'])<=now()))
-            return (initiative_ok and live['state']==scene and time.monotonic()-started<remaining_ttl
+            return (initiative_ok and self.image_scene_valid(key,scene,job) and time.monotonic()-started<remaining_ttl
                     and (not task or not task.cancelling())
                     and (not job or live.get('scene_hair','')==job.snapshot.get('hairstyle','') or
-                         live.get('scene_hair') is None and job.snapshot.get('hairstyle')=='long blue-violet hair'))
+                         live.get('scene_hair') is None and job.snapshot.get('hairstyle')=='long blue-violet hair' or
+                         job.data.get('scene_authorization',{}).get('source')=='explicit_user' and live.get('scene_version',0)==job.data['scene_authorization'].get('base_version')))
         async def batch():
             for index in range(picture_count):
                 if job and index:job.data.pop('prompt_id',None)
@@ -1400,13 +1528,25 @@ class Bot:
                     async with self.locks.setdefault(key,asyncio.Lock()):
                         session=self.store.get(key)
                         stamp=now().isoformat(timespec='seconds');session['last_image_sent_at']=stamp
+                        authorization=job.data.get('scene_authorization',{}) if job else {}
+                        if authorization.get('source')=='explicit_user' and session.get('scene_version',0)==authorization.get('base_version'):
+                            if session['state']!=scene or job.snapshot.get('hairstyle')!=session.get('scene_hair',job.snapshot.get('hairstyle')):
+                                session['state']=copy.deepcopy(scene)
+                                if job.snapshot.get('hairstyle'):session['scene_hair']=job.snapshot['hairstyle']
+                                session['scene_version']=session.get('scene_version',0)+1
+                        candidate=job.data.get('candidate') or {} if job else {}
+                        if candidate.get('source_type')=='life':
+                            session['life_state']={'character':character_key(session['state']['character']),'activity':candidate['character_activity'],
+                                'started_at':stamp,'expires_at':candidate['expires_at'],'source':'fictional_routine_enactment','phase':'image_acknowledged'}
+                        delivery_state.event(session,'image_acknowledged',now(),image_task_id=job.id if job else None,message_id=acknowledgement.get('message_id'))
                         session['image_events']=[s for s in session.get('image_events',[]) if isinstance(s,str) and s.startswith(stamp[:10])][-9:]+[stamp]
                         session['drawing_sends']=(session.get('drawing_sends',[])+[{'day':stamp[:10],'at':stamp,'kind':job.data['decision'].get('kind','explicit') if job else 'explicit'}])[-100:]
                         if job:
                             shot=job.snapshot
                             session['shot_history']=(session.get('shot_history',[])+[shot_director.history_entry(shot,qa,job.data.get('render_config',{}),job.id)])[-12:]
                             session['recent_visuals']=(session.get('recent_visuals',[])+[{'key':image_director.fingerprint([shot['location'],shot['outfit'],shot['action'],shot['camera']]),'action':shot['action'],'camera':shot['camera'],'location':shot['location']}])[-5:]
-                        session['last_image_context']={'snapshot':job.snapshot if job else {},'at':stamp,'source':'fictional_illustration'}
+                        session['last_image_context']={'snapshot':job.snapshot if job else {},'at':stamp,'source':'fictional_illustration',
+                            'qa_observation':{k:qa.get(k) for k in ('visible','composition','issues')},'observation_is_model_judgment':True}
                         session['sent_image_hashes']=(session.get('sent_image_hashes',[])+[digest])[-30:]
                         session['history']=(session['history']+[{'role':'assistant','content':'[图片已实际发送成功]'+(' '+job.data.get('caption','') if job else ''),'at':stamp}])[-20:]
                         self.store.save(key,session)
@@ -1414,7 +1554,9 @@ class Bot:
                         job.record('sent',reason='qq_acknowledged',qq_result=acknowledgement,sent_index=index+1)
                         self.image_decision_record(key,{'image_task_id':job.id,'event':job.data.get('related_event_id'),'kind':job.data['decision'].get('kind'),'status':'sent','reason':'qq_acknowledged'})
                         with (ROOT/'data'/'delivery_metrics.jsonl').open('a',encoding='utf-8') as archive:
-                            archive.write(json.dumps({'event':'image_sent','image_task_id':job.id,'conversation':job.data.get('conversation_id'),'at':stamp,'sent':True})+'\n')
+                            archive.write(json.dumps({'event':'image_sent','image_task_id':job.id,'conversation':job.data.get('conversation_id'),
+                                'input_batch_id':job.data.get('input_batch_id'),'request_id':job.data.get('request_id'),
+                                'origin':'initiative' if job.data.get('initiative') else 'explicit_image' if job.data['decision'].get('kind')=='explicit' else 'conversation_image','at':stamp,'sent':True})+'\n')
                 delivery=asyncio.create_task(deliver())
                 try:
                     await asyncio.shield(delivery)
@@ -1426,7 +1568,7 @@ class Bot:
                         await asyncio.gather(delivery,return_exceptions=True)
                     raise
         batch_task=asyncio.create_task(batch())
-        chatter=asyncio.create_task(self.image_chatter(event,key,lines,activity,batch_task,picture_count,ticket=original_ticket))
+        chatter=asyncio.create_task(self.image_chatter(event,key,lines,activity,batch_task,picture_count))
         try:
             await asyncio.wait_for(batch_task,timeout=remaining_ttl)
             if job and job.data['status']=='sent':job.record('completed')
@@ -1470,9 +1612,11 @@ class Bot:
         if not config['image_chat']:
             return
         interval = max(5., float(config['image_chat_interval']))
-        limit = min(len(lines), int(config['image_chat_max']))
-        original_ticket=ticket or self.scheduler.current.get(key)
+        limit = min(len(lines), int(config['image_chat_max']),1)
+        chatter_started=time.monotonic()
+        image_task_id=event.get('_image_task_id')
         for line in lines[:limit]:
+            if re.search(r'别催|爱信不信|发错人|在弄|出得慢|快好了|正在生成|已经发图',line):continue
             try:
                 await asyncio.wait_for(asyncio.shield(image_job), timeout=interval*(.85+secrets.randbelow(31)/100))
                 return
@@ -1486,11 +1630,14 @@ class Bot:
                 async with self.locks.setdefault(key, asyncio.Lock()):
                     if image_job.done() or self.activity.get(key, 0) != activity:
                         return
-                    token=CURRENT.set(original_ticket)
+                    token=CURRENT.set(None)
+                    timing_token=reply_timing.set(None)
                     try:
-                        await self.send(event,line,image_guard=lambda:not image_job.done())
+                        ack=await self.send(event,line,background=True,image_guard=lambda:not image_job.done())
+                        self.background_metric(key,'sent',chatter_started,origin='initiative' if event.get('_initiative') else 'image_waiting',image_task_id=image_task_id,qq_acknowledged=bool(ack and ack.get('message_id')))
                     finally:
                         CURRENT.reset(token)
+                        reply_timing.reset(timing_token)
                     session = self.store.get(key)
                     session['history'] = (session['history'] + [{'role': 'assistant', 'content': dialogue.render_time(line, now()), 'at': now().isoformat(timespec='seconds')}])[-20:]
                     self.store.save(key, session)
@@ -1499,8 +1646,20 @@ class Bot:
                 return
 
     async def prepare_candidate(self,event,key,candidate,settings,data=None):
-        async with self.comfy.gpu.reservation():
-            return await self._prepare_candidate(event,key,candidate,settings,data)
+        try:
+            async with self.comfy.gpu.reservation():
+                return await self._prepare_candidate(event,key,candidate,settings,data)
+        except asyncio.CancelledError:
+            return None
+        finally:
+            for identifier,(owner,task) in list(self.image_planning.items()):
+                if owner==key and task is asyncio.current_task():
+                    self.image_planning.pop(identifier,None)
+                    try:
+                        from image_recovery import load_job
+                        job=load_job(ROOT/'data'/'image_jobs'/identifier/'job.json')
+                        if job.data['status']=='planning':job.record('cancelled',reason='candidate_planner_stopped')
+                    except (OSError,ValueError):pass
 
     async def _prepare_candidate(self,event,key,candidate,settings,data=None):
         self.locks.setdefault(key,asyncio.Lock())
@@ -1514,8 +1673,12 @@ class Bot:
         decision.setdefault('image_task_id',candidate['candidate_id'])
         self.image_decision_record(key,decision)
         if not decision['allowed']:return
-        if sum(len(q) for q in self.image_queues.values())+len(self.image_tasks)>=settings['drawing'].get('queue_limit',6):
+        if self.image_load()>=settings['drawing'].get('queue_limit',6):
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'queue_full'});return
+        job=image_director.Job(ROOT/'data'/'image_jobs',{'state':copy.deepcopy(session['state'])},decision,'',self.activity.get(key,0))
+        job.data.update(conversation_id=candidate['conversation_id'],candidate=candidate,initiative=bool(event.get('_initiative')))
+        job.record('planning',reason='candidate_accepted_for_planning')
+        self.image_planning[job.id]=(key,asyncio.current_task())
         session['candidate_plans']=(session.get('candidate_plans',[])+[{'day':now().date().isoformat(),'kind':candidate['source_type']}])[-100:]
         session['candidate_attempts']=(session.get('candidate_attempts',[])+[candidate['dedupe_key']])[-100:]
         self.store.save(key,session)
@@ -1526,18 +1689,29 @@ class Bot:
             try:
                 data=await deepseek(self.http,session['state'],session['history'],request,True,context=cache_context(session))
             except Exception as exc:
+                job.record('failed',reason='visual_planning_failed',error=type(exc).__name__)
                 self.image_decision_record(key,{**decision,'allowed':False,'status':'failed','reason':'visual_planning_failed','error':type(exc).__name__});return
         live=self.store.get(key)
         import social_reasoning
+        if image_requests.latest(live) and image_progress.snapshot(ROOT,live,key,now(),self.started_at)['status'] in image_progress.ACTIVE|{'interrupted','outcome_unknown','recovered_output','not_started'}:
+            job.record('cancelled',reason='unresolved_explicit_request')
+            self.image_decision_record(key,{**decision,'allowed':False,'reason':'unresolved_explicit_request'});return
         if self.image_epochs.get(key,0)!=epoch:
+            job.record('cancelled',reason='cancelled_during_candidate_planning')
             self.image_decision_record(key,{**decision,'allowed':False,'status':'cancelled','reason':'cancelled_during_candidate_planning'});return
-        if social_reasoning.boundary_blocks(live,candidate['character_activity'],now()):return
+        if social_reasoning.boundary_blocks(live,candidate['character_activity'],now()):
+            job.record('cancelled',reason='user_boundary');return
         if live['state']!=candidate['scene_description'] or datetime.fromisoformat(candidate['expires_at'])<=now():
+            job.record('expired',reason='candidate_expired_or_scene_changed')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'candidate_expired_or_scene_changed'});return
-        if not settings.get('spontaneous_images',True) or not preferences.load().get('spontaneous_images',True):return
-        if event.get('_initiative') and not preferences.load().get('proactive_enabled',False):return
-        if live.get('busy_until') and datetime.fromisoformat(live['busy_until'])>now():return
+        if not settings.get('spontaneous_images',True) or not preferences.load().get('spontaneous_images',True):
+            job.record('cancelled',reason='automatic_images_disabled');return
+        if event.get('_initiative') and not preferences.load().get('proactive_enabled',False):
+            job.record('cancelled',reason='initiative_disabled');return
+        if live.get('busy_until') and datetime.fromisoformat(live['busy_until'])>now():
+            job.record('cancelled',reason='user_busy');return
         if data.get('state')!=candidate['scene_description']:
+            job.record('failed',reason='visual_plan_scene_conflict')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'visual_plan_scene_conflict'});return
         data['state']=dict(live['state'])
         data['send_image']=True
@@ -1546,21 +1720,22 @@ class Bot:
         data['_candidate']=candidate
         data['image_plan']={**data.get('image_plan',{}),'kind':candidate['source_type']}
         assemble(live,data)
-        if candidate['source_type']=='life':
-            live['life_state']={'character':character_key(live['state']['character']),'activity':candidate['character_activity'],'started_at':candidate['created_at'],'expires_at':candidate['expires_at'],'source':'fictional_routine_enactment'}
         if complete_from_cache(live,data) or image_concept.needs_plan(data):
-            job=image_director.Job(ROOT/'data'/'image_jobs',{'state':copy.deepcopy(live['state'])},decision,'',self.activity.get(key,0))
             await self.prepare_image(event,key,candidate['character_activity'],data,decision,settings,False,job,epoch)
-        else:self.launch_image(event,key,'',live,data,decision,settings)
+        else:
+            self.image_planning.pop(job.id,None)
+            self.launch_image(event,key,'',live,data,decision,settings,job=job)
 
     async def initiative_tick(self):
         import initiative,image_candidates
         settings=preferences.load()
         if os.getenv('IMAGE_MODE','off')!='auto' or not settings.get('proactive_enabled',False):return
+        if time.monotonic()-getattr(self,'connected_at',0)<60:return
         for user in sorted(self.users):
             key=f'private:0:{user}'
             if key in self.inbox_workers or key in self.image_tasks or self.image_slots.active:continue
             session=self.store.get(key);current=now()
+            if image_requests.latest(session) and image_progress.snapshot(ROOT,session,key,current,self.started_at)['status'] in image_progress.ACTIVE|{'interrupted','outcome_unknown','recovered_output','not_started'}:continue
             if not initiative.eligible(session,current,settings,self.connected.is_set()):continue
             routine_user=str(user)+':'+character_key(session['state']['character'])
             event=self.context.routine.current_event(routine_user,current)
@@ -1572,10 +1747,65 @@ class Bot:
             self.store.save(key,session)
             await self.prepare_candidate({'message_type':'private','user_id':user,'_initiative':True},key,candidate,settings)
 
+    async def send_recovered(self,event,key,session):
+        from image_recovery import load_job
+        status=image_progress.snapshot(ROOT,session,key,now(),self.started_at)
+        if status['status']!='recovered_output':return await self.send(event,status['text'])
+        job=load_job(ROOT/'data'/'image_jobs'/status['job_id']/'job.json')
+        if job.data.get('decision',{}).get('kind')!='explicit':return await self.send(event,'旧的自动分享已经过期，不再补发。')
+        image=(job.path/'recovered.png').read_bytes()
+        digest=hashlib.sha256(image).hexdigest()
+        if digest in session.get('sent_image_hashes',[]):
+            job.record('duplicate_suppressed',reason='recovered_image_already_sent')
+            return await self.send(event,'原图已有送达记录，不再重复发送。')
+        qa=await image_director.inspect_image(self.http,image,job.snapshot,ROOT/'data',preferences.load()['drawing'])
+        if not qa.get('pass'):
+            job.record('withheld_quality',reason='recovered_quality_rejected',quality=qa)
+            return await self.send(event,'原图没有通过检查，已保留在本机，没有发送。')
+        job.record('ready_to_send',reason='owner_requested_recovered_image',quality=qa)
+        dispatched=False
+        def on_dispatch():
+            nonlocal dispatched
+            dispatched=True;job.record('sending',reason='recovered_handed_to_qq')
+        try:ack=await self.send(event,image=image,on_dispatch=on_dispatch)
+        except BaseException as exc:
+            if dispatched:
+                rejected=isinstance(exc,ImageFailure) and exc.code=='qq_send_rejected'
+                job.record('failed' if rejected else 'qq_result_unknown',reason='qq_send_rejected' if rejected else 'recovered_qq_ack_unknown',automatic_resend=False)
+            raise
+        job.record('completed',reason='qq_acknowledged',qq_result=ack)
+        live=self.store.get(key);stamp=now().isoformat()
+        live['sent_image_hashes']=(live.get('sent_image_hashes',[])+[digest])[-30:]
+        live['last_image_sent_at']=stamp
+        live['drawing_sends']=(live.get('drawing_sends',[])+[{'day':stamp[:10],'at':stamp,'kind':'explicit'}])[-100:]
+        live['last_image_context']={'snapshot':job.snapshot,'at':stamp,'source':'fictional_illustration'}
+        if job.snapshot.get('shot_plan'):
+            live['shot_history']=(live.get('shot_history',[])+[shot_director.history_entry(job.snapshot,qa,job.data.get('render_config',{}),job.id)])[-12:]
+        live['history']=(live['history']+[{'role':'assistant','content':'[重启前原图已实际发送成功]','at':stamp}])[-20:]
+        self.store.save(key,live)
+
+    async def reconcile_images(self):
+        from image_recovery import reconcile
+        while True:
+            try:
+                results=await reconcile(self.http,self.comfy.url,ROOT,self.started_at,preferences.load()['drawing']['task_ttl_seconds'])
+                if results:log.info('重启图片对账：%s',json.dumps(results,ensure_ascii=False))
+            except Exception as exc:log.warning('重启图片对账失败：%s',type(exc).__name__)
+            await asyncio.sleep(30)
+
+    def connection_warning(self,reason,delay):
+        current=time.monotonic()
+        self.connection_failures=getattr(self,'connection_failures',0)+1
+        if current-getattr(self,'last_connection_warning',-300)>=300 or reason!=getattr(self,'last_connection_reason',None):
+            log.warning('NapCat 不可用 (%s)，%s 秒后重连；本段累计 %s 次',reason,delay,self.connection_failures)
+            self.last_connection_warning=current;self.last_connection_reason=reason
+
     async def run(self):
         if not self.users:
             raise ValueError('请在 .env 的 ALLOWED_USERS 填写你的 QQ 号码')
         headers = {'Authorization': 'Bearer ' + os.environ['NAPCAT_TOKEN']}
+        recovery=asyncio.create_task(self.reconcile_images())
+        self.tasks.add(recovery);recovery.add_done_callback(self.tasks.discard)
         delay = 2
         while True:
             try:
@@ -1583,6 +1813,10 @@ class Bot:
                         headers=headers, heartbeat=30, max_msg_size=32*1024*1024) as ws:
                     self.ws = ws
                     self.connected.set()
+                    self.connected_at=time.monotonic()
+                    if getattr(self,'connection_failures',0):
+                        log.info('NapCat 连接恢复；离线期间失败 %s 次，等待实际消息确认收发',self.connection_failures)
+                        self.connection_failures=0
                     delay = 2
                     log.info('已连接 NapCat，等待白名单用户消息')
                     async for message in ws:
@@ -1604,7 +1838,7 @@ class Bot:
                         if accepted and len(self.tasks) < 20:
                             e['_ws'] = ws
                             self.enqueue(e, *accepted)
-                    log.warning('NapCat 连接已关闭，close_code=%s，%s 秒后重连', ws.close_code, delay)
+                    self.connection_warning('closed_'+str(ws.close_code),delay)
             except asyncio.CancelledError:
                 for future in list(self.pending.values()):
                     if not future.done():
@@ -1615,7 +1849,7 @@ class Bot:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                log.warning('NapCat 连接中断或不可用 (%s)，%s 秒后重连', type(exc).__name__, delay)
+                self.connection_warning(type(exc).__name__,delay)
             finally:
                 self.connected.clear()
                 self.ws = None
@@ -1642,8 +1876,9 @@ async def routine_loop(instance, http):
             user=os.getenv('OWNER_QQ') or os.getenv('ALLOWED_USERS','').split(',')[0].strip()
             if user:
                 current=now()
+                weather=await instance.context.weather.ensure(http,current)
                 character=instance.store.get(f'private:0:{user}')['state']['character']
-                await instance.context.routine.ensure(http,user+':'+character_key(character),current,character)
+                await instance.context.routine.ensure(http,user+':'+character_key(character),current,weather,character)
         except Exception as exc:
             log.warning('日程后台准备失败：%s',type(exc).__name__)
         await asyncio.sleep(1800)
@@ -1666,6 +1901,7 @@ async def main(check=False):
             return
         try:
             instance=Bot(http)
+            weather_task=asyncio.create_task(instance.context.weather.loop(http,now))
             daily_task=asyncio.create_task(routine_loop(instance,http))
             initiative_task=asyncio.create_task(initiative_loop(instance))
             gpu_task=asyncio.create_task(instance.comfy.gpu.run())
@@ -1675,10 +1911,11 @@ async def main(check=False):
             try:
                 await instance.run()
             finally:
+                weather_task.cancel()
                 daily_task.cancel()
                 initiative_task.cancel()
                 gpu_task.cancel()
-                await asyncio.gather(daily_task,initiative_task,gpu_task,return_exceptions=True)
+                await asyncio.gather(weather_task,daily_task,initiative_task,gpu_task,return_exceptions=True)
                 if profile_task:
                     profile_task.cancel()
                     await asyncio.gather(profile_task,return_exceptions=True)

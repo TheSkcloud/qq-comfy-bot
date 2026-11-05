@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 from aiohttp import web, ClientSession
 from context_engine import ContextEngine
 from life import Life,redact
+import schedule
+from weather import DailyWeather
 from web_manager import Dashboard
 
 NOW=datetime(2026,10,28,14,tzinfo=ZoneInfo('Asia/Shanghai'))
@@ -25,21 +27,86 @@ class Response:
     async def json(self):return self.data
 
 
+class WeatherHTTP:
+    def __init__(self,fail=False):self.count=0;self.fail=fail
+    def get(self,*args,**kwargs):
+        self.count+=1
+        data={'daily':{'time':[kwargs['params']['start_date']],'weather_code':[3], 'temperature_2m_max':[15], 'temperature_2m_min':[3], 'precipitation_probability_max':[20],'wind_speed_10m_max':[10]}}
+        return Response(data,self.fail)
+
+
+class WeatherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_persisted_one_call_per_day_even_after_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'weather.db';http=WeatherHTTP();service=DailyWeather(path)
+            await service.ensure(http,NOW)
+            await DailyWeather(path).ensure(http,NOW+timedelta(hours=8))
+            self.assertEqual(http.count,1)
+            await service.ensure(http,NOW+timedelta(days=1))
+            self.assertEqual(http.count,2)
+
+    async def test_failure_does_not_silently_retry_same_day(self):
+        with tempfile.TemporaryDirectory() as folder:
+            service=DailyWeather(Path(folder)/'weather.db');http=WeatherHTTP(True)
+            await service.ensure(http,NOW);await service.ensure(http,NOW)
+            self.assertEqual(http.count,5)
+            self.assertEqual(service.read('2026-10-28')['status'],'unavailable')
+
+    async def test_second_provider_and_daily_success_cache(self):
+        from unittest.mock import AsyncMock
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'weather.db';service=DailyWeather(path)
+            forecast=dict(date='2026-10-28',location='山西太原尖草坪',source='MET Norway',summary='备用预报')
+            with patch.object(service,'fetch',AsyncMock(side_effect=[OSError('offline'),forecast])) as fetch:
+                result=await service.ensure(object(),NOW)
+                self.assertEqual(result['source'],'MET Norway')
+                self.assertEqual(fetch.await_count,2)
+                await DailyWeather(path).ensure(object(),NOW)
+                self.assertEqual(fetch.await_count,2)
+
+    async def test_concurrent_request_has_one_claim(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'weather.db';http=WeatherHTTP()
+            await asyncio.gather(DailyWeather(path).ensure(http,NOW),DailyWeather(path).ensure(http,NOW))
+            self.assertEqual(http.count,1)
+
+
+class ScheduleTests(unittest.TestCase):
+    def test_week_anchor_advances_on_monday(self):
+        self.assertEqual(schedule.week_number(NOW.date()),8)
+        self.assertEqual(schedule.week_number(datetime(2026,11,1).date()),8)
+        self.assertEqual(schedule.week_number(datetime(2026,11,2).date()),9)
+
+    def test_week_eight_wednesday_and_alternating_monday(self):
+        data=schedule.today(NOW)
+        self.assertEqual(len(data['courses']),3)
+        self.assertIn('大学英语A(3)',data['possible'])
+        self.assertTrue(data['uncertain'])
+        self.assertFalse(schedule.in_weeks(6,'1-3,5,7,8-15'))
+        self.assertTrue(schedule.in_weeks(8,'1-3,5,7,8-15'))
+
+    def test_tuesday_laboratory_changes(self):
+        eight=schedule.today(datetime(2026,10,27,20,tzinfo=NOW.tzinfo))
+        nine=schedule.today(datetime(2026,11,3,20,tzinfo=NOW.tzinfo))
+        self.assertIn('大物实验室1',[c['room'] for c in eight['courses']])
+        self.assertIn('大物实验室2',[c['room'] for c in nine['courses']])
+
+
 class MemoryTests(unittest.TestCase):
     def test_location_changes_record_history_and_keep_users_separate(self):
         with tempfile.TemporaryDirectory() as folder:
             life=Life(folder)
-            life.record('a',[dict(kind='location',value='城市甲',evidence='我在城市甲')],'我在城市甲',NOW)
+            life.record('a',[dict(kind='location',value='太原',evidence='我在太原')],'我在太原',NOW)
             life.record('a',[dict(kind='location',value='北京',evidence='我到了北京')],'我到了北京',NOW)
             self.assertEqual(life.facts('a')[0]['value'],'北京')
-            self.assertEqual(life.journal()[0]['previous'],'城市甲')
+            self.assertEqual(life.journal()[0]['previous'],'太原')
             self.assertEqual(life.facts('b'),[])
             self.assertEqual(len((Path(folder)/'conversation_journal.jsonl').read_text(encoding='utf-8').splitlines()),2)
 
     def test_wishes_and_hallucinated_location_are_not_facts(self):
         with tempfile.TemporaryDirectory() as folder:
             life=Life(folder)
-            for message,value in [('我想去北京','北京'),('假如我在北京','北京'),('我在城市甲','城市乙')]:
+            for message,value in [('我想去北京','北京'),('假如我在北京','北京'),('我在太原','上海')]:
                 self.assertEqual(life.record('a',[dict(kind='location',value=value,evidence=message)],message,NOW),[])
 
     def test_emotion_accumulates_and_decays_without_public_journal(self):
@@ -98,6 +165,13 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
     async def test_cross_origin_post_is_rejected(self):
         async with self.http.post(self.url+'/api/preferences',json={},headers={'Authorization':'Bearer local-test','Origin':'https://unrelated.invalid'}) as r:
             self.assertEqual(r.status,403)
+    async def test_status_and_preference_ack_show_effective_global_mode(self):
+        cfg={'spontaneous_images':True,'proactive_enabled':True}
+        with patch.dict('os.environ',{'IMAGE_MODE':'off'}),patch('web_manager.preferences.load',return_value=cfg),patch('web_manager.preferences.save'):
+            async with self.http.get(self.url+'/api/status',headers={'Authorization':'Bearer local-test'}) as response:
+                data=await response.json();self.assertFalse(data['drawing_effective']['spontaneous_enabled']);self.assertFalse(data['drawing_effective']['proactive_enabled'])
+            async with self.http.post(self.url+'/api/preferences',json={'proactive_enabled':True},headers={'Authorization':'Bearer local-test'}) as response:
+                data=await response.json();self.assertTrue(data['ok']);self.assertEqual(data['drawing_effective']['reason'],'global_mode_off')
 
 
 if __name__=='__main__':unittest.main()

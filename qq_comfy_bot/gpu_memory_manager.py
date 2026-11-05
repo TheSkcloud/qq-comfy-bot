@@ -70,6 +70,7 @@ class GPUManager:
         finally:self.active-=1
 
     async def get(self,route):
+        self.last_route=route
         async with self.http.get(self.url+route,timeout=aiohttp.ClientTimeout(total=5)) as response:
             response.raise_for_status();return await response.json()
 
@@ -180,12 +181,17 @@ class GPUManager:
                     device_usage_change_bytes=sum(r['device_used_bytes'] for r in before)-sum(r['device_used_bytes'] for r in after))
                 self.record('idle_unload',**result);return result
         except (aiohttp.ClientError,asyncio.TimeoutError,OSError,ValueError,KeyError,TypeError,AttributeError) as exc:
-            self.record('unload_skipped',reason='state_or_interface_unavailable',error=type(exc).__name__)
-            return {'reason':'state_or_interface_unavailable','error':type(exc).__name__}
+            detail='service_unavailable' if isinstance(exc,aiohttp.ClientConnectorError) else 'request_timeout' if isinstance(exc,asyncio.TimeoutError) else 'http_error' if isinstance(exc,aiohttp.ClientResponseError) else 'invalid_response' if isinstance(exc,(ValueError,KeyError,TypeError,AttributeError)) else 'connection_failed'
+            return {'reason':'state_or_interface_unavailable','detail_reason':detail,'error':type(exc).__name__,'route':getattr(self,'last_route','unknown')}
 
     async def run(self):
+        last_signature=None;last_recorded=0;suppressed=0
         while True:
             await asyncio.sleep(self.config['interval'])
             result=await self.tick()
             if result['reason'] not in ('not_idle_long_enough','already_unloaded'):
-                self.record('idle_check',**result)
+                signature=(result['reason'],result.get('detail_reason'),result.get('error'))
+                if signature!=last_signature or self.clock()-last_recorded>=300:
+                    self.record('idle_check',suppressed_repeats=suppressed,**result)
+                    last_signature=signature;last_recorded=self.clock();suppressed=0
+                else:suppressed+=1

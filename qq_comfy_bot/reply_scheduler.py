@@ -4,6 +4,7 @@ import contextvars
 from dataclasses import dataclass, field
 import time
 import random
+import uuid
 
 CURRENT = contextvars.ContextVar('scheduled_reply', default=None)
 
@@ -29,6 +30,7 @@ class Ticket:
     typing_ms: float = 0
     reply_type: str = 'casual_chat'
     segment_count: int = 1
+    input_batch_id: str = field(default_factory=lambda:uuid.uuid4().hex)
 
 
 

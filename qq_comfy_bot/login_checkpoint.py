@@ -6,11 +6,12 @@ from datetime import datetime,timezone
 import psutil
 
 
-def record(root,config,event,state):
+def record(root,config,event,state,**fields):
     try:
         base=Path(config['qq_data_dir']) if config.get('qq_data_dir') else None
         entry={'at':datetime.now(timezone.utc).isoformat(),'boot':psutil.boot_time(),
                'event':event,'state':state,'pinned_data_directory':str(base) if base else None}
+        entry.update({k:v for k,v in fields.items() if k in ('previous_state','login_phase','is_login','qr_accepted','failure_category','recovery_action','error_type','worker_exit_code')})
         if base:
             global_path=base/'nt_qq'/'global'
             registry=global_path/'nt_data'/'msf'/'Registry20'

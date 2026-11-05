@@ -40,35 +40,49 @@ class Life:
         finally:
             connection.close()
 
-    def record(self,user,updates,message,current):
+    def record(self,user,updates,message,current,diagnostics=None):
         stamp=current.isoformat(timespec='hours')
         accepted=[]
+        diagnostics=diagnostics if diagnostics is not None else {}
+        diagnostics.update(proposed=len(updates),accepted=0,rejected=0,reasons={})
+        def reject(reason):
+            diagnostics['rejected']+=1
+            diagnostics['reasons'][reason]=diagnostics['reasons'].get(reason,0)+1
         for item in updates[:4]:
+            if not isinstance(item,dict):reject('invalid_item');continue
             kind=item.get('kind');value=str(item.get('value','')).strip()[:160];evidence=str(item.get('evidence','')).strip()
             if re.search(r'假如|假设|开玩笑|模仿|反话|逗你',message):
+                reject('hypothetical_or_joke')
                 continue
             if kind!='plan' and re.search(r'如果|要是|打算|计划|准备去|想去',evidence):
+                reject('plan_as_fact')
                 continue
             if kind not in KINDS or not evidence or evidence not in message or not value:
+                reject('invalid_kind_value_or_evidence')
                 continue
             if kind=='location' and (not re.search(r'我(?:现在)?(?:在|到|回|住|搬)|到了|搬到',evidence) or re.search(r'不在|没到|想去|打算|如果|假如|角色|你在',evidence)):
+                reject('unconfirmed_location')
                 continue
             if kind=='location' and value not in evidence:
+                reject('location_not_in_evidence')
                 continue
             value=redact(value)
             if not value:
+                reject('sensitive_value')
                 continue
             slot=kind if kind in ('location','activity') else kind+':'+hashlib.sha256(value.encode()).hexdigest()[:12]
             with self.db() as db:
                 row=db.execute('SELECT value FROM facts WHERE user=? AND kind=?',(user,slot)).fetchone()
                 previous=row[0] if row else None
                 if previous==value:
+                    reject('unchanged')
                     continue
                 db.execute('INSERT OR REPLACE INTO facts VALUES (?,?,?,?)',(user,slot,value,stamp))
                 db.execute('INSERT INTO events(user,at,kind,value,previous,evidence) VALUES (?,?,?,?,?,?)',
                            (user,stamp,kind,value,previous,redact(evidence)[:180]))
             event=dict(at=stamp,user=user,kind=kind,value=value,previous=previous,evidence=redact(evidence)[:180])
             accepted.append(event)
+            diagnostics['accepted']+=1
             with (self.root/'conversation_journal.jsonl').open('a',encoding='utf-8') as archive:
                 archive.write(json.dumps(event,ensure_ascii=False)+'\n')
         return accepted

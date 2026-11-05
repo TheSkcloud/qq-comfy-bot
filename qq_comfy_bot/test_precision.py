@@ -110,7 +110,7 @@ class BackgroundClosedLoop(unittest.IsolatedAsyncioTestCase):
             async def chat(r):
                 body=await r.json()
                 if '生成图验收员' in body['messages'][0]['content']:
-                    counts['qa']+=1;data={k:True for k in ('pass','identity_ok','scene_ok','anatomy_ok','style_ok')};data['uncertain']=False
+                    counts['qa']+=1;data={k:True for k in ('pass','identity_ok','scene_ok','anatomy_ok','style_ok')};data['uncertain']=False;data['findings']=[]
                 else:
                     counts['plans']+=1;data={'reply':'读到一半。','state':state,'send_image':True,'visual_tags':'woman, reading','visual_scene':{'identity':'adult woman','outfit':'white shirt','setting':'room desk','action':'reading a book','composition':'side view'},'image_caption':'翻到这页了。'}
                 if counts['plans']:
@@ -127,7 +127,7 @@ class BackgroundClosedLoop(unittest.IsolatedAsyncioTestCase):
                 return conn
             app=web.Application();app.router.add_get('/system_stats',stats);app.router.add_get('/object_info',objects);app.router.add_post('/prompt',prompt);app.router.add_get('/history/{pid}',history);app.router.add_get('/view',view);app.router.add_post('/chat/completions',chat);app.router.add_get('/ws',ws)
             runner=web.AppRunner(app);await runner.setup();site=web.TCPSite(runner,'127.0.0.1',0);await site.start();port=site._server.sockets[0].getsockname()[1];url=f'http://127.0.0.1:{port}'
-            cfg={**bot.preferences.load(),'proactive_enabled':True,'drawing':d.config({'initiative':0,'daily_budget':4})}
+            cfg={**bot.preferences.load(),'proactive_enabled':True,'drawing':d.config({'initiative':1,'daily_budget':4})}
             instance=None;network=None;loop=None
             try:
                 with patch.object(bot,'ROOT',root),patch.object(bot,'now',side_effect=lambda:clock[0]),patch.object(bot.preferences,'load',return_value=cfg),patch.dict(os.environ,{'COMFYUI_URL':url,'NAPCAT_WS_URL':url.replace('http','ws')+'/ws','NAPCAT_TOKEN':'local','DEEPSEEK_BASE_URL':url,'DEEPSEEK_API_KEY':'local','ALLOWED_USERS':'42','IMAGE_MODE':'auto'}):
@@ -139,6 +139,7 @@ class BackgroundClosedLoop(unittest.IsolatedAsyncioTestCase):
                             db.execute('INSERT INTO routines VALUES (?,?,?)',('2026-11-01','42:'+bot.character_key(state['character']),json.dumps([(0,14,'休息'),(14,24,'在房间读书')])))
                         db.close()
                         network=asyncio.create_task(instance.run());await asyncio.wait_for(instance.connected.wait(),2)
+                        instance.connected_at-=61  # The reconnect observation window has elapsed.
                         advances=0
                         async def virtual_sleep(seconds):
                             nonlocal advances

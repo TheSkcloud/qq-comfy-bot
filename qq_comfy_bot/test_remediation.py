@@ -105,6 +105,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.root_patch=patch.object(bot,'ROOT',self.root);self.root_patch.start()
         self.instance=bot.Bot(None);self.instance.connected.set()
+        # Transport tests exercise admission success; probability gates have their own tests.
+        self.transport_preferences=bot.preferences.load()
+        self.transport_preferences['drawing'].update(initiative=1,comfort=1,comic=1)
+        self.preferences_patch=patch.object(bot.preferences,'load',side_effect=lambda:copy.deepcopy(self.transport_preferences))
+        self.preferences_patch.start();self.addCleanup(self.preferences_patch.stop)
         self.instance.context.build=AsyncMock(return_value='')
         self.instance.indicate_typing=AsyncMock()
         self.instance.scheduler.remaining=lambda *args:0

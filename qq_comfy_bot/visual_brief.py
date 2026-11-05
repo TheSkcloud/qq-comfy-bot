@@ -19,7 +19,7 @@ def complete_from_cache(session, data):
             brief['identity'] = cache['identity_tags']
         for field, source in (('outfit', 'clothing'), ('setting', 'location')):
             item = cache.get(field, {})
-            if item.get('source') == normalize(state[source]) and usable_tags(item.get('tags')):
+            if (field=='outfit' or not usable_tags(brief.get(field))) and item.get('source') == normalize(state[source]) and usable_tags(item.get('tags')):
                 brief[field] = item['tags']
     plan = data.get('image_plan') or {}
     if isinstance(plan, dict):
@@ -59,7 +59,7 @@ def cache_context(session):
     for field, label, source in [('outfit','同一套服装的固定绘图标签','clothing'), ('setting','同一地点的固定绘图标签','location')]:
         item = cache.get(field, {})
         if item.get('source') == normalize(state[source]) and usable_tags(item.get('tags')):
-            parts.append(label+'：'+item['tags'])
+            parts.append((label if field=='outfit' else '上一张同一大地点的子场景，仅供参考，当前活动或新规划优先')+'：'+item['tags'])
     return '\n'.join(parts)
 
 
@@ -78,7 +78,7 @@ def assemble(session, data):
     for field, source in [('outfit','clothing'), ('setting','location')]:
         item = cache.get(field, {})
         source_key = normalize(state[source])
-        if item.get('source') != source_key or not usable_tags(item.get('tags')):
+        if item.get('source') != source_key or not usable_tags(item.get('tags')) or field=='setting' and item.get('tags') != brief[field]:
             item = {'source':source_key, 'tags':brief[field]}
             cache[field] = item
         tags.append(item['tags'])

@@ -14,7 +14,10 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 import autostart
 import preferences
+import image_mode
+import schedule
 from life import Life, redact
+from weather import DailyWeather
 from plugins.onenote import read_notes, format_notes
 
 ROOT=Path(__file__).resolve().parent
@@ -27,9 +30,17 @@ class Dashboard:
         self.state={'qq':'检查中','bot':'检查中','comfy':'待命'}
         self.stop=asyncio.Event()
         self.life=Life(self.root/'data')
+        self.weather=DailyWeather(self.root/'data'/'weather.db')
 
     def emit(self,key,value):
+        previous=self.state.get(key)
         self.state[key]=value
+        tray=getattr(self,'tray',None)
+        if tray and key=='qq':
+            tray.title=('晚风 · '+str(value))[:120]
+            if previous!=value and '请扫码' in str(value):
+                try:tray.notify('QQ 登录已失效，请打开控制台扫码更新。','晚风 · 需要扫码')
+                except Exception:logging.warning('系统通知不可用，托盘仍显示扫码状态')
 
     def current(self):
         return datetime.now(ZoneInfo('Asia/Shanghai'))
@@ -58,6 +69,8 @@ class Dashboard:
         app.router.add_post('/api/preferences',self.set_preferences)
         app.router.add_post('/api/autostart',self.set_autostart)
         app.router.add_get('/api/journal',self.journal)
+        app.router.add_get('/api/timetable',self.timetable)
+        app.router.add_post('/api/week',self.set_week)
         app.router.add_post('/api/notes',self.notes)
         app.router.add_get('/api/qrcode',self.qrcode)
         app.router.add_post('/api/refresh-qr',self.refresh_qr)
@@ -72,10 +85,12 @@ class Dashboard:
 
     async def status(self,request):
         now=self.current()
+        weather=self.weather.read(now.date().isoformat())
         # Deliberately whitelist fields: no private emotional metrics or raw note bodies.
         return web.json_response(dict(qq=self.state.get('qq'),bot=self.state.get('bot'),comfy=self.state.get('comfy'),
-            hour=now.strftime('%Y.%m.%d %H时'),
-            autostart=autostart.enabled(),need_qr=bool(self.state.get('qr')) and not str(self.state.get('qq')).startswith('已在线')))
+            hour=now.strftime('%Y.%m.%d %H时'),weather=weather or {'status':'pending','summary':'今日天气尚未同步'},
+            week=schedule.week_number(now.date()),course_count=len(schedule.today(now)['courses']),
+            autostart=autostart.enabled(),drawing_effective=image_mode.effective(preferences.load()),need_qr=bool(self.state.get('qr')) and not str(self.state.get('qq')).startswith('已在线')))
 
     async def get_preferences(self,request):
         return web.json_response(preferences.load())
@@ -85,7 +100,7 @@ class Dashboard:
             preferences.save(await request.json())
         except (ValueError,TypeError):
             raise web.HTTPBadRequest(text='设置格式不正确')
-        return web.json_response({'ok':True})
+        return web.json_response({'ok':True,'drawing_effective':image_mode.effective(preferences.load())})
 
     async def set_autostart(self,request):
         data=await request.json()
@@ -96,6 +111,17 @@ class Dashboard:
 
     async def journal(self,request):
         return web.json_response({'entries':self.life.journal(30)})
+
+    async def timetable(self,request):
+        return web.json_response(dict(**schedule.today(self.current()),all_courses=schedule.load()['courses']))
+
+    async def set_week(self,request):
+        data=await request.json();week=data.get('week')
+        if type(week) is not int or not 1<=week<=30:
+            raise web.HTTPBadRequest()
+        config=schedule.load();config.update(anchor_week=week,anchor_date=self.current().date().isoformat())
+        schedule.PATH.write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf-8')
+        return web.json_response({'ok':True})
 
     async def notes(self,request):
         data=await request.json();query=str(data.get('query','')).strip()[:100]
@@ -182,6 +208,7 @@ async def serve():
     tray=None
     try:
         tray=tray_app.start(url,controller.stop,ROOT)
+        controller.tray=tray
     except Exception:
         logging.exception('托盘启动失败，仍可在控制台退出')
     if '--autostart' not in sys.argv:

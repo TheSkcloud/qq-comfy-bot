@@ -38,6 +38,7 @@ def normalize(value,scene=None,plan=None):
 def instruction():
     return ('绘图时先构思具体的一幅画，再输出英文场景词汇。creative_brief:{'+','.join(FIELDS)+'}各字段为非空字符串；'
         'concept/narrative_moment/emotional_intent/context_connection/creative_reason用简短中文，说明此刻为什么画这个具体瞬间，不是模板安慰；'
+        '先确定可见的瞬间与一个细小转折：Life抓住活动中的停顿或细节，Comfort给不越界的小画，Comic呼应有证据的共同梗；不要只是换表情的站桩肖像，也不强行加戏。转折要落实到action/gesture/props/focal_point，创意理由本身不是画面标签。优先一个清楚动作、少量道具，避免复杂双手接触。'
         'subject/action/expression/gesture/props/environment/atmosphere/focal_point用英文视觉描述，无道具写no additional props。'
         '用户明确的动作、衣服、地点、视角优先，当前角色身份/发型/服装/地点保持连续，时间以当前时钟为准。'
         'Life来自角色已建立的活动，Comfort/Comic可以想象但不改生活状态，不把用户经历搬到角色身上。'
@@ -51,9 +52,40 @@ def apply(data):
     data['creative_brief']=brief
     # Camera never comes from the creative module. Stable visual anchors are retained.
     plan=data.get('image_plan') if isinstance(data.get('image_plan'),dict) else {}
-    data['image_plan']={**plan,'action':brief['action']+', '+brief['gesture'],
+    from visual_brief import usable_tags
+    scene=dict(data.get('visual_scene') or {})
+    # A concrete current environment is the single prompt and QA target.
+    environment=brief['environment']
+    if usable_tags(environment) and not re.search(r'\bsaved\b|\bcurrent location\b',environment,re.I):
+        scene['setting']=environment
+    action=unique_tags(brief['action'],brief['gesture'])
+    scene['action']=action
+    data['visual_scene']=scene
+    data['image_plan']={**plan,'action':action,
                         'props':brief['props'],'mood':brief['expression']}
     return True
+
+
+def unique_tags(*values):
+    result=[];seen=set()
+    for value in values:
+        for part in value.split(','):
+            part=part.strip();key=re.sub(r'\s+',' ',part).casefold()
+            if key and key not in seen:result.append(part);seen.add(key)
+    return ', '.join(result)
+
+
+def conflicts(data):
+    """Reject obvious contradictory staging before a GPU submission."""
+    scene=data.get('visual_scene',{})
+    setting=scene.get('setting','').lower()
+    action=data.get('image_plan',{}).get('action',scene.get('action','')).lower()
+    issues=[]
+    if re.search(r'\b(?:street|sidewalk|outdoors)\b',setting) and re.search(r'\b(?:indoor|indoors|bedroom|kitchen|home room)\b',setting):issues.append('indoor_outdoor_conflict')
+    location=data.get('state',{}).get('location','')
+    if re.search(r'家|房间|宿舍|寝室|\bhome\b|\broom\b',location,re.I) and re.search(r'^(?:residential )?street\b|\boutdoors\b|\bsidewalk\b',setting):issues.append('saved_location_conflict')
+    if re.search(r'\b(?:standing|stand)\b',action) and re.search(r'\b(?:sitting|seated)\b',action):issues.append('standing_sitting_conflict')
+    return issues
 
 
 def context(session,text,data):
