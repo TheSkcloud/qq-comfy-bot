@@ -152,13 +152,24 @@ async def qq_status(http, url, token, expected_account=None):
             deadline = time.monotonic() + 5
             while len(result) < 2 and time.monotonic() < deadline:
                 data = await ws.receive_json(timeout=3)
-                if data.get('echo') in ('get_status', 'get_login_info'):
+                if isinstance(data, dict) and data.get('echo') in ('get_status', 'get_login_info'):
                     result[data['echo']] = data
-            status = result.get('get_status', {})
-            login = result.get('get_login_info', {})
-            if expected_account and str(login.get('data', {}).get('user_id', '')) != str(expected_account):
-                return 'wrong_account'
-            return 'online' if status.get('data', {}).get('online') else 'offline'
+                    details = data.get('data')
+                    if data['echo'] == 'get_status' and isinstance(details, dict) and details.get('online') is False:
+                        return 'offline'
+            status = result.get('get_status', {}).get('data')
+            login = result.get('get_login_info', {}).get('data')
+            if not isinstance(status, dict) or type(status.get('online')) is not bool:
+                return 'unavailable'
+            if not status['online']:
+                return 'offline'
+            if expected_account:
+                account = login.get('user_id') if isinstance(login, dict) else None
+                if account is None or not str(account).isdigit() or int(account) <= 0:
+                    return 'unavailable'
+                if str(account) != str(expected_account):
+                    return 'wrong_account'
+            return 'online'
     except aiohttp.WSServerHandshakeError as exc:
         return 'token_error' if exc.status in (401, 403) else 'unavailable'
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError):
@@ -185,38 +196,76 @@ def napcat_running(config):
     return False
 
 
-async def recover_qq_login(http, config, diagnostics=None):
-    """Reuse QQ's saved ticket through local NapCat; never use passwords or log tokens."""
+async def napcat_webui(http, config):
+    """Authenticate against this installation's loopback management port."""
     import hashlib
-    diagnostics=diagnostics if diagnostics is not None else {}
+    web = json.loads((Path(config['napcat_dir']) / 'config' / 'webui.json').read_text(encoding='utf-8-sig'))
+    if web.get('enable2FA'):
+        raise PermissionError('NapCat WebUI requires manual authentication')
+    base = f"http://127.0.0.1:{int(web.get('port', 6099))}/api/"
+    timeout = aiohttp.ClientTimeout(total=12)
+
+    async def post(path, body, headers=None):
+        async with http.post(base + path, json=body, headers=headers, timeout=timeout) as response:
+            response.raise_for_status()
+            result = await response.json()
+            if not isinstance(result, dict):
+                raise ValueError('Invalid NapCat response')
+            return result
+
+    digest = hashlib.sha256((web['token'] + '.napcat').encode()).hexdigest()
+    auth = await post('auth/login', {'hash': digest})
+    data = auth.get('data')
+    credential = data.get('Credential') if isinstance(data, dict) else None
+    if not isinstance(credential, str) or not credential:
+        raise PermissionError('NapCat WebUI authentication failed')
+
+    async def call(path, body):
+        return await post(path, body, {'Authorization': 'Bearer ' + credential})
+    return call
+
+
+def napcat_qr_version(path):
     try:
-        web = json.loads((Path(config['napcat_dir']) / 'config' / 'webui.json').read_text(encoding='utf-8-sig'))
-        if web.get('enable2FA'):
-            return 'manual_auth'
-        port = int(web.get('port', 6099))
-        base = f'http://127.0.0.1:{port}/api/'
-        timeout = aiohttp.ClientTimeout(total=12)
-        async def call(path, body, headers=None):
-            async with http.post(base + path, json=body, headers=headers, timeout=timeout) as response:
-                response.raise_for_status()
-                return await response.json()
-        auth = await call('auth/login', {'hash': hashlib.sha256((web['token'] + '.napcat').encode()).hexdigest()})
-        credential = (auth.get('data') or {}).get('Credential')
-        if not credential:
-            return 'manual_auth'
-        headers = {'Authorization': 'Bearer ' + credential}
+        info = path.stat()
+        return f'{info.st_mtime_ns}-{info.st_size}' if info.st_size else ''
+    except OSError:
+        return ''
+
+
+async def refresh_napcat_qr(http, config):
+    qr = Path(config['napcat_dir']) / 'cache' / 'qrcode.png'
+    call = await napcat_webui(http, config)
+    status = await call('QQLogin/CheckLoginStatus', {})
+    state = status.get('data')
+    if status.get('code') != 0 or not isinstance(state, dict):
+        raise ValueError('NapCat login state unavailable')
+    if state.get('isLogin') or state.get('qrLoginAccepted') or state.get('loginPhase') in ('qrcode_scanned', 'initializing', 'reconnecting'):
+        raise ValueError('NapCat login is already in progress or ready')
+    previous = napcat_qr_version(qr)
+    result = await call('QQLogin/RefreshQRcode', {})
+    if result.get('code') != 0:
+        raise ValueError('NapCat refused QR refresh')
+    for _ in range(24):
+        version = napcat_qr_version(qr)
+        if version and version != previous:
+            return qr
+        await asyncio.sleep(.25)
+    raise ValueError('NapCat did not write a fresh QR image')
+
+
+async def recover_qq_login(http, config, diagnostics=None):
+    """Reuse QQ's saved ticket through local NapCat."""
+    diagnostics = diagnostics if diagnostics is not None else {}
+    try:
+        call = await napcat_webui(http, config)
         account = str(config['bot_qq'])
-        saved = await call('QQLogin/GetQuickLoginQQ', {}, headers)
-        if saved.get('code') != 0:
-            return 'unavailable'
-        if saved.get('data') != account:
-            saved = await call('QQLogin/SetQuickLoginQQ', {'uin': account}, headers)
-            if saved.get('code') != 0:
-                return 'unavailable'
-        status = await call('QQLogin/CheckLoginStatus', {}, headers)
+        status = await call('QQLogin/CheckLoginStatus', {})
         if status.get('code') != 0:
             return 'unavailable'
-        state = status.get('data') or {}
+        state = status.get('data')
+        if not isinstance(state, dict):
+            return 'unavailable'
         diagnostics.update(login_phase=str(state.get('loginPhase','unknown'))[:50],is_login=bool(state.get('isLogin')),qr_accepted=bool(state.get('qrLoginAccepted')))
         # Let the kernel finish reconnecting and never switch an already logged-in account.
         if state.get('isLogin') or state.get('loginPhase') in ('reconnecting','qrcode_scanned','initializing') or state.get('qrLoginAccepted'):
@@ -228,13 +277,22 @@ async def recover_qq_login(http, config, diagnostics=None):
         if requires_scan(state.get('loginError','')):
             diagnostics['failure_category']='ticket_invalid_requires_qr'
             return 'needs_qr'
-        result = await call('QQLogin/SetQuickLogin', {'uin': account}, headers)
+        saved = await call('QQLogin/GetQuickLoginQQ', {})
+        if saved.get('code') != 0:
+            return 'unavailable'
+        if str(saved.get('data')) != account:
+            saved = await call('QQLogin/SetQuickLoginQQ', {'uin': account})
+            if saved.get('code') != 0:
+                return 'unavailable'
+        result = await call('QQLogin/SetQuickLogin', {'uin': account})
         diagnostics['recovery_action']='quick_login_saved_account'
         if result.get('code') == 0:
             return 'pending'
         # Network/kernel initialization failures must not permanently disable recovery.
         message=result.get('message') or result.get('msg','')
         return 'needs_qr' if requires_scan(message) else 'unavailable'
+    except PermissionError:
+        return 'manual_auth'
     except (OSError, KeyError, ValueError, TypeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
         diagnostics['error_type']=type(exc).__name__
         return 'unavailable'

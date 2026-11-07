@@ -58,7 +58,13 @@ def apply(data):
     environment=brief['environment']
     if usable_tags(environment) and not re.search(r'\bsaved\b|\bcurrent location\b',environment,re.I):
         scene['setting']=environment
-    action=unique_tags(brief['action'],brief['gesture'])
+    action=brief['action']
+    # Keep novel spatial refinements without repeating a summary of the same action.
+    words=set(re.findall(r'[a-z]+',action.casefold()))
+    for clause in brief['gesture'].split(','):
+        tokens=set(re.findall(r'[a-z]+',clause.casefold()))
+        if tokens and len(tokens & words)/len(tokens)<.65:
+            action=unique_tags(action,clause);words.update(tokens)
     scene['action']=action
     data['visual_scene']=scene
     data['image_plan']={**plan,'action':action,
@@ -85,7 +91,9 @@ def conflicts(data):
     location=data.get('state',{}).get('location','')
     if re.search(r'家|房间|宿舍|寝室|\bhome\b|\broom\b',location,re.I) and re.search(r'^(?:residential )?street\b|\boutdoors\b|\bsidewalk\b',setting):issues.append('saved_location_conflict')
     if re.search(r'\b(?:standing|stand)\b',action) and re.search(r'\b(?:sitting|seated)\b',action):issues.append('standing_sitting_conflict')
-    return issues
+    if re.search(r'家|宿舍|寝室|home',location,re.I) and not re.search(r'\bhome\b',setting):
+        if re.search(r'\b(?:rehearsal room|dance studio|cafe|coffee shop|bubble tea shop|restaurant)\b',setting):issues.append('saved_location_conflict')
+    return list(dict.fromkeys(issues))
 
 
 def context(session,text,data):

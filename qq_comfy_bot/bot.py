@@ -28,6 +28,7 @@ import response_plan
 import media_input
 import image_director
 import image_workflow
+import art_styles
 import shot_director
 import dialogue_depth
 import image_progress
@@ -76,6 +77,7 @@ HELP = '''可以直接和我聊天，例如：换一件白色连衣裙，去海�
 /换装 服装描述
 /地点 场景描述
 /拍照 [动作、构图或表情]
+/画风 [原版|赛璐璐|手绘] 查看或切换绘图画风
 /状态 查看设定与现实时间
 /进度 查看最近图片任务（不调用模型、不重复生成）
 /取图 领取重启后找到的原图（先检查，不重新生成）
@@ -115,15 +117,13 @@ def lighting(hour):
     return 'night, dark sky, ambient artificial lighting'
 
 
-def visual_prompt(tags, hour, appearance='', mood='natural gentle expression', character='', frozen=False):
-    # H 的固定风格前缀；角色、活动、服装和背景由本轮上下文生成。
-    prefix = ('masterpiece, best quality, very aesthetic, highres, newest, detailed illustration, '
-              'hand-drawn 2d anime illustration, soft shading, delicate colored outlines, '
-              '(@ningen mame:1.9), (@meme50:2.1), (@rurudo:1.9), (@piratescat01:1.6)')
+def visual_prompt(tags, hour, appearance='', mood='natural gentle expression', character='', frozen=False, art_style='original'):
+    art_style=art_styles.resolve(art_style)
+    prefix=art_styles.STYLES[art_style]['prefix']
     clean=[]
     for tag in scene_tags(tags, hour, '' if frozen else character).split(','):
         tag=tag.strip()
-        if not tag or any(x in tag.lower() for x in ('photorealistic','3d render','cgi','@92m','@bluearchstyle','hdr','shiny skin')):
+        if not tag or any(x in tag.lower() for x in (('photorealistic','3d render','cgi','@92m','@bluearchstyle','hdr','shiny skin') if art_style=='original' else ('photorealistic','3d render','cgi','hdr','shiny skin','@ningen','@meme50','@rurudo','@piratescat'))):
             continue
         if tag.lower() not in {x.lower() for x in clean}: clean.append(tag)
     return ', '.join([prefix]+clean+([appearance] if appearance else [])+[mood,'scnr'])
@@ -188,6 +188,7 @@ class Comfy:
         self.url = os.getenv('COMFYUI_URL', 'http://127.0.0.1:8188').rstrip('/')
         self.lock = asyncio.Lock()
         self.template = None
+        self.info = None
         self.gpu=GPUManager(http,self.url,ROOT/'data')
 
     async def check(self):
@@ -204,6 +205,7 @@ class Comfy:
             workflow = json.loads((ROOT / 'workflow.json').read_text(encoding='utf-8-sig'))
             self.template = convert(workflow, info)
         validate_graph(self.template, info)
+        self.info = info
         log.info('工作流检查通过：%d 个 API 节点', len(self.template))
 
     async def image(self, prompt, job=None):
@@ -248,6 +250,11 @@ class Comfy:
                         graph=await image_workflow.apply(self.http,self.url,graph,job.data['render_config'])
                     if job and 'test_seed' in job.data:
                         graph['70']['inputs']['seed']=job.data['test_seed']
+                    # Validate the final recipe, including runtime rewiring and model choices.
+                    if job and job.data.get('render_config',{}).get('art_style') and self.info is None:
+                        async with self.http.get(self.url+'/object_info') as response:
+                            response.raise_for_status();self.info=await response.json()
+                    if self.info is not None:validate_graph(graph,self.info)
                     stage='submit'
                     self.gpu.submitting(task_id)
                     async with self.http.post(self.url + '/prompt', json={
@@ -859,6 +866,13 @@ class Bot:
             return
         if command in ('/帮助', '/help', '/bot'):
             return await self.send(e, HELP)
+        if command=='/画风':
+            if not arg:return await self.send(e,art_styles.menu(art_styles.selected(session)))
+            try:style=art_styles.resolve(arg)
+            except ValueError as exc:return await self.send(e,str(exc))
+            session['art_style']=style
+            self.store.save(key,session)
+            return await self.send(e,'已切换为'+art_styles.describe(style)+'画风，用于新建图片任务。已排队的图片保持原画风。')
         if command=='/天气':
             data=await self.context.weather.ensure(self.http,now())
             return await self.send(e,data['summary'])
@@ -964,7 +978,7 @@ class Bot:
             return await self.send(e, '已恢复默认角色并清空聊天记忆。')
         if command == '/状态':
             s = session['state']
-            return await self.send(e, f'角色：{s["character"]}\n服装：{s["clothing"]}\n场景：{s["location"]}\n现实时间：{now():%Y-%m-%d %H}时')
+            return await self.send(e, f'角色：{s["character"]}\n服装：{s["clothing"]}\n场景：{s["location"]}\n画风：{art_styles.describe(art_styles.selected(session))}\n现实时间：{now():%Y-%m-%d %H}时')
         changes = {'/角色': 'character', '/换装': 'clothing', '/地点': 'location'}
         if command in changes:
             if not arg:
@@ -1329,16 +1343,18 @@ class Bot:
             data['_image_failure']='missing_english_action'
             if job:job.record('failed',reason='missing_english_action')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'missing_english_action'});return
+        snapshot['art_style']=art_styles.selected(session)
+        if snapshot['art_style']!='original':
+            snapshot['expected_art_style']+='; '+art_styles.STYLES[snapshot['art_style']]['prefix']
         snapshot['shot_plan']=shot_director.choose(snapshot,text,session.get('shot_history',[])+session.get('shot_attempts',[]))
         snapshot['camera']=snapshot['shot_plan']['tags']
         visual_key=image_director.fingerprint([snapshot['location'],snapshot['outfit'],snapshot['action'],snapshot['camera']])
         if not explicit and any(v.get('key')==visual_key for v in session.get('recent_visuals',[])[-2:]):
             if job:job.record('duplicate_suppressed',reason='repeated_visual')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'repeated_visual'});return
-        prompt = visual_prompt(image_director.build_tags(snapshot),datetime.fromisoformat(snapshot['local_time']).hour,
-                               '',shot_director.visible_emotion(snapshot),session['state']['character'],frozen=True)
         render_config=image_workflow.prepare(ROOT,snapshot)
-        prompt=image_workflow.prompt(snapshot,render_config,prompt)
+        prompt=image_workflow.prompt(snapshot,render_config)
+        snapshot['render_target']=copy.deepcopy(render_config['prompt_spec'])
         snapshot['shot_plan']['aspect_ratio']=[render_config.get('width'),render_config.get('height')]
         if job:
             job.snapshot=copy.deepcopy(snapshot)
