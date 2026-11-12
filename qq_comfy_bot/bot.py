@@ -77,7 +77,7 @@ HELP = '''可以直接和我聊天，例如：换一件白色连衣裙，去海�
 /换装 服装描述
 /地点 场景描述
 /拍照 [动作、构图或表情]
-/画风 [原版|赛璐璐|手绘] 查看或切换绘图画风
+/画风 查看当前固定画风
 /状态 查看设定与现实时间
 /进度 查看最近图片任务（不调用模型、不重复生成）
 /取图 领取重启后找到的原图（先检查，不重新生成）
@@ -867,12 +867,7 @@ class Bot:
         if command in ('/帮助', '/help', '/bot'):
             return await self.send(e, HELP)
         if command=='/画风':
-            if not arg:return await self.send(e,art_styles.menu(art_styles.selected(session)))
-            try:style=art_styles.resolve(arg)
-            except ValueError as exc:return await self.send(e,str(exc))
-            session['art_style']=style
-            self.store.save(key,session)
-            return await self.send(e,'已切换为'+art_styles.describe(style)+'画风，用于新建图片任务。已排队的图片保持原画风。')
+            return await self.send(e,'当前绘图固定使用赛璐璐画风和手部 Detailer。')
         if command=='/天气':
             data=await self.context.weather.ensure(self.http,now())
             return await self.send(e,data['summary'])

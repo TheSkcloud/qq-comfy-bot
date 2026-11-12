@@ -65,6 +65,9 @@ class Supervisor:
                         self.last_online = time.time()
                     elif state in ('wrong_account', 'token_error'):
                         self.emit('qq', '连接账号不符' if state == 'wrong_account' else 'token 不匹配，请检查配置')
+                    elif self.config.get('qq_provider') == 'snowluma':
+                        self.emit('qq', '等待 SnowLuma，请在桌面 QQ 窗口登录')
+                        self.emit('qr', '')
                     else:
                         # Never kill QQ or launch another instance every polling cycle.
                         if time.monotonic() >= self.next_napcat_attempt and not await asyncio.to_thread(services.napcat_running, self.config):

@@ -32,6 +32,18 @@ def workflow_info(workflow):
     return info
 
 
+def active_workflow_info(workflow):
+    info = workflow_info(workflow)
+    info['LoraLoaderModelOnly']['input']['required']['lora_name'][0].append(
+        'bluearchivefull1-000006.safetensors'
+    )
+    info['TulutHandDetailer'] = {}
+    info['UpscaleModelLoader'] = {
+        'input': {'required': {'model_name': [['4x-UltraSharp.pth']]}}
+    }
+    return info
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.workflow = json.loads((bot.ROOT / 'workflow.json').read_text(encoding='utf-8-sig'))
@@ -116,7 +128,7 @@ class APITests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name)
         workflow = json.loads((bot.ROOT / 'workflow.json').read_text(encoding='utf-8-sig'))
         (self.root / 'workflow.json').write_text(json.dumps(workflow), encoding='utf-8')
-        self.info = workflow_info(workflow)
+        self.info = active_workflow_info(workflow)
         self.requests = []
         self.reply = dict(reply='好呀，去海边吧。', state=dict(character='成年女性，金发绿眼',
                           clothing='白色连衣裙', location='海边'), send_image=True,

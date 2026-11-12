@@ -7,7 +7,7 @@ from aiohttp import web
 from PIL import Image
 import aiohttp,bot,image_candidates as c,image_director as d,social_reasoning as social
 import test_remediation
-from test_bot import workflow_info
+from test_bot import active_workflow_info
 
 class SocialTests(unittest.TestCase):
     def setUp(self):
@@ -97,7 +97,7 @@ class BackgroundClosedLoop(unittest.IsolatedAsyncioTestCase):
     async def test_virtual_clock_real_routine_to_http_comfy_qa_and_websocket_ack(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);root.joinpath('workflow.json').write_text((bot.ROOT/'workflow.json').read_text(encoding='utf-8-sig'),encoding='utf-8')
-            info=workflow_info(json.loads((root/'workflow.json').read_text()))
+            info=active_workflow_info(json.loads((root/'workflow.json').read_text()))
             clock=[datetime(2026,11,1,13,59,tzinfo=ZoneInfo('Asia/Shanghai'))]
             state=copy.deepcopy(bot.DEFAULT);state.update(location='房间书桌旁',clothing='白衬衫')
             output=io.BytesIO();Image.effect_noise((256,256),50).convert('RGB').save(output,format='PNG')

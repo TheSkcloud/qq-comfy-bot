@@ -10,6 +10,7 @@ def composition_prompt(text):
     return SINGLE_FRAME+', '+', '.join(parts)
 
 DEFAULT = 'original'
+ACTIVE_STYLE = 'cel'
 STYLES = {
     'original': {'name':'原版', 'description':'原有 H 画风',
         'prefix':'masterpiece, best quality, very aesthetic, highres, newest, detailed illustration, hand-drawn 2d anime illustration, soft shading, delicate colored outlines, (@ningen mame:1.9), (@meme50:2.1), (@rurudo:1.9), (@piratescat01:1.6)'},
@@ -28,7 +29,7 @@ def resolve(value):
     except (KeyError,AttributeError):raise ValueError('未知画风。可选：原版、赛璐璐、手绘。') from None
 
 def selected(session):
-    return resolve(session.get('art_style',DEFAULT))
+    return ACTIVE_STYLE
 
 def describe(value):
     return STYLES[resolve(value)]['name']

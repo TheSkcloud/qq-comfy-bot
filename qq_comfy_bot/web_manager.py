@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from aiohttp import web
 import autostart
+import snowluma_service
 import preferences
 import image_mode
 import dashboard_logs
@@ -71,6 +72,7 @@ class Dashboard:
         app.router.add_get('/api/preferences',self.get_preferences)
         app.router.add_post('/api/preferences',self.set_preferences)
         app.router.add_post('/api/autostart',self.set_autostart)
+        app.router.add_post('/api/snowluma/{setting:autostart|running}',self.set_snowluma)
         app.router.add_get('/api/journal',self.journal)
         app.router.add_get('/api/timetable',self.timetable)
         app.router.add_post('/api/week',self.set_week)
@@ -102,6 +104,7 @@ class Dashboard:
         return web.json_response(dict(qq=self.state.get('qq'),bot=self.state.get('bot'),comfy=self.state.get('comfy'),
             hour=now.strftime('%Y.%m.%d %H时'),weather=weather or {'status':'pending','summary':'今日天气尚未同步'},
             week=schedule.week_number(now.date()),course_count=len(schedule.today(now)['courses']),
+            snowluma=await asyncio.to_thread(snowluma_service.status),
             autostart=autostart.enabled(),drawing_effective=image_mode.effective(preferences.load()),qr_version=qr_version,need_qr=bool(qr_version) and not str(self.state.get('qq')).startswith('已在线')))
 
     async def get_preferences(self,request):
@@ -119,6 +122,19 @@ class Dashboard:
         if type(data.get('enabled')) is not bool:
             raise web.HTTPBadRequest()
         autostart.set_enabled(data['enabled'])
+        return web.json_response({'ok':True})
+
+    async def set_snowluma(self,request):
+        data=await request.json()
+        if not isinstance(data,dict) or type(data.get('enabled')) is not bool:
+            raise web.HTTPBadRequest()
+        setter=(snowluma_service.set_autostart if request.match_info['setting']=='autostart'
+                else snowluma_service.set_running)
+        try:
+            await asyncio.to_thread(setter,data['enabled'])
+        except (OSError,RuntimeError) as exc:
+            logging.exception('SnowLuma control failed')
+            raise web.HTTPServiceUnavailable(text='无法更新 SnowLuma，请查看运行日志') from exc
         return web.json_response({'ok':True})
 
     async def journal(self,request):

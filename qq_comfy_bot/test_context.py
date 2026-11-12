@@ -56,7 +56,7 @@ class WeatherTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'weather.db';service=DailyWeather(path)
-            forecast=dict(date='2026-10-28',location='示例城区',source='MET Norway',summary='备用预报')
+            forecast=dict(date='2026-10-28',location='本地',source='MET Norway',summary='备用预报')
             with patch.object(service,'fetch',AsyncMock(side_effect=[OSError('offline'),forecast])) as fetch:
                 result=await service.ensure(object(),NOW)
                 self.assertEqual(result['source'],'MET Norway')

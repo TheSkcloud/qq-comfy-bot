@@ -86,27 +86,22 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.instance.enqueue(self.event,self.key,text)
         await self.workers()
 
-    async def test_commands_do_not_call_model_preserve_state_persist_and_isolate(self):
+    async def test_style_commands_preserve_session_and_cannot_override_active_style(self):
         baseline=self.instance.store.get(self.key)
+        baseline['art_style']='original'
+        self.instance.store.save(self.key,baseline)
         with patch.object(bot,'deepseek',AsyncMock()) as model:
             await self.command('/画风')
-            await self.command('/画风 赛璐璐')
-            await self.command('/画风 不存在')
+            await self.command('/画风 手绘')
             await self.command('/状态')
             model.assert_not_called()
         session=self.instance.store.get(self.key)
-        self.assertEqual(session['art_style'],'cel')
+        self.assertEqual(session['art_style'],'original')
         self.assertEqual(session['state'],baseline['state'])
-        self.assertEqual(styles.selected(self.instance.store.get('other')),'original')
-        db_path=self.instance.store.db.execute('PRAGMA database_list').fetchone()[2]
-        reopened=SessionStore(db_path,{})
-        try:self.assertEqual(reopened.get(self.key)['art_style'],'cel')
-        finally:reopened.db.close()
-        await self.command('/画风 原版')
-        self.assertEqual(styles.selected(self.instance.store.get(self.key)),'original')
+        self.assertEqual(styles.selected(session),'cel')
+        self.assertEqual(styles.selected(self.instance.store.get('other')),'cel')
 
-    async def test_inflight_job_keeps_frozen_style_when_session_switches(self):
-        await self.command('/画风 赛璐璐')
+    async def test_new_job_freezes_active_style(self):
         started=asyncio.Event();release=asyncio.Event();seen=[]
         async def draw(prompt,job=None):
             seen.append(copy.deepcopy(job.data));started.set();await release.wait();return b'image'
@@ -121,7 +116,7 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[0]['render_config']['art_style'],'cel')
         self.assertEqual(seen[0]['snapshot']['art_style'],'cel')
         self.assertNotIn('@rurudo',seen[0]['prompt'])
-        self.assertEqual(styles.selected(self.instance.store.get(self.key)),'handdrawn')
+        self.assertEqual(styles.selected(self.instance.store.get(self.key)),'cel')
 
 class SubmissionTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp=test_bot.APITests.asyncSetUp
@@ -129,6 +124,9 @@ class SubmissionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_preset_lora_is_rejected_before_any_gpu_submission(self):
         from unittest.mock import Mock
+        self.info['LoraLoaderModelOnly']['input']['required']['lora_name'][0].remove(
+            'bluearchivefull1-000006.safetensors'
+        )
         comfy=bot.Comfy(self.http)
         job=Mock();job.data={'render_config':styles.settings('cel')};job.id='test-style-validation'
         with self.assertRaisesRegex(RuntimeError,'模型文件名|选项不可用'):

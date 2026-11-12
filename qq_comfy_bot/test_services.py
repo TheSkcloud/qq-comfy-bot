@@ -200,12 +200,12 @@ class ConfigurationTests(unittest.TestCase):
             app = qq.parent / 'versions' / '9.9.99-55555' / 'resources' / 'app'
             app.mkdir(parents=True)
             (app / 'package.json').write_text(json.dumps({'version': '9.9.99', 'main': 'original.js'}))
-            cmd, env = services.napcat_command(dict(napcat_dir=str(napcat), qq_exe=str(qq), bot_qq='901000008'))
-            self.assertEqual(cmd[-2:], ['-q', '901000008'])
+            cmd, env = services.napcat_command(dict(napcat_dir=str(napcat), qq_exe=str(qq), bot_qq='901000009'))
+            self.assertEqual(cmd[-2:], ['-q', '901000009'])
             package = json.loads((napcat / 'qqnt.json').read_text())
             self.assertEqual((app / package['main']).resolve(), napcat / 'loadNapCat.cjs')
             self.assertEqual(env['NAPCAT_MAIN_PATH'], str(napcat / 'napcat.mjs'))
-            self.assertEqual(env['NAPCAT_QUICK_ACCOUNT'], '901000008')
+            self.assertEqual(env['NAPCAT_QUICK_ACCOUNT'], '901000009')
 
     def test_bot_file_lock_prevents_duplicate(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(services, 'ROOT', Path(folder)):
