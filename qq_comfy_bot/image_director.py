@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from PIL import Image, ImageStat
 from companion import character_key, load_card
-from image_policy import image_requested
+from image_policy import cancels_image, image_requested
 
 DEFAULTS = dict(initiative=.35, daily_budget=3, cooldown_minutes=45,
                 comfort=.3, comic=.25, quiet_start=23, quiet_end=8,
@@ -101,10 +101,11 @@ def transition(session, data, text, current):
     return changes
 
 
-def scene_context(session):
-    return ('绘图保持当前地点和服装；换装/移动必须明确叙述并输出scene_update:{field:clothing或location,evidence:reply中的原句}。'
-            '发型固定为'+session.get('scene_hair','角色原有发型')+'，只有用户明确要求才改变。'
-            '若考虑出图，在同一次JSON输出image_plan:{kind:life/comfort/comic/explicit,event:具体事件短句,'
+def scene_context(session,include_plan=True):
+    current=('地点和服装保持连续；换装或移动应明确叙述并提供scene_update:{field:clothing或location,evidence:reply中的原句}。'
+             '发型固定为'+session.get('scene_hair','角色原有发型')+'，只有用户明确要求才改变。')
+    if not include_plan:return current
+    return (current+'若考虑出图，在同一次JSON输出image_plan:{kind:life/comfort/comic/explicit,event:具体事件短句,'
             'evidence:用户原话或life_update.activity中的连续片段,relevance:0到1,action:英文动作,'
             'props:英文道具,mood:英文表情,camera:英文构图}。不值得出图就省略。'
             'life必须对应已经建立的角色当下活动；用户自己的吃饭喝水不等于角色正在吃喝。'
@@ -123,7 +124,7 @@ def decide(session, text, data, current, settings, enabled=True):
     style=('comic' if re.search(r'搞怪|漫画|整活|搞笑',text) else
            'comfort' if re.search(r'安慰.{0,8}(?:画|图)|画.{0,8}(?:安慰|小画)',text) else 'life') if explicit else kind
     result={'allowed':False,'kind':kind,'style':style,'priority':KINDS.get(kind,30),'reason':'not_proposed'}
-    if re.search(r'(?:不要|别|不用|不需要|不聊|不说|不看).{0,8}(?:图|拍照|画|照片)',text):
+    if cancels_image(text):
         return {**result,'reason':'user_declined'}
     if explicit:
         return {**result,'allowed':True,'reason':'explicit_user_request','event':fingerprint(['explicit',text])}
@@ -212,16 +213,22 @@ def freeze(session,data,decision,current,settings):
     p=p if isinstance(p,dict) else {}
     p={k:v[:600] for k,v in p.items() if isinstance(v,str)}
     card=load_card(session['state']['character'])
+    overrides=data.get('_visual_overrides',[])
+    local_labels=data.get('_local_scene_labels',{})
     snapshot={'character_id':character_key(session['state']['character']),
-              'identity':card.get('visual_identity') or brief.get('identity') or session['state']['character'],
-              'location':session['state']['location'],'outfit':session['state']['clothing'],
+              'identity':brief.get('identity') if 'identity' in overrides else card.get('visual_identity') or brief.get('identity') or session['state']['character'],
+              'location':brief.get('setting') if 'setting' in overrides else local_labels.get('location',session['state']['location']),
+              'outfit':brief.get('outfit') if 'outfit' in overrides else local_labels.get('outfit',session['state']['clothing']),
               'hairstyle':session.get('scene_hair','long blue-violet hair' if card.get('id')=='suzuki_hana' else ''),
               'local_time':current.astimezone(ZoneInfo(cfg['timezone'])).isoformat(),
               'timezone':cfg['timezone'],'activity':copy.deepcopy(session.get('life_state',{})),
               'outfit_tags':brief.get('outfit',''),'setting_tags':brief.get('setting',''),
               'action':p.get('action') or brief.get('action',''), 'props':p.get('props',''),
               'emotion':p.get('mood','natural expression'), 'camera':p.get('camera') or brief.get('composition','medium shot'),
-              'style':decision['style'], 'request_kind':decision.get('kind','explicit'), 'state':copy.deepcopy(session['state'])}
+              'style':decision['style'], 'request_kind':decision.get('kind','explicit'), 'state':copy.deepcopy(session['state']),
+              'visual_overrides':overrides,'visual_exclusions':data.get('_visual_exclusions',[]),
+              'visual_source':'local_routine' if data.get('_local_visual') else 'planned'}
+    if '_visual_hour' in data:snapshot['visual_hour']=data['_visual_hour']
     snapshot['expected_art_style']={'life':'established anime workflow','comfort':'colored pencil chibi gift illustration','comic':'single panel chibi manga'}.get(decision['style'],'established anime workflow')
     def english(value,fallback=''):
         return value if isinstance(value,str) and value.strip() and not re.search(r'[\u4e00-\u9fff]',value) else fallback if isinstance(fallback,str) and not re.search(r'[\u4e00-\u9fff]',fallback) else ''
@@ -237,9 +244,10 @@ def freeze(session,data,decision,current,settings):
         snapshot['camera']='square avatar composition, head and shoulders, centered face, clear silhouette, safe margins for circular crop'
     else:
         snapshot['purpose']=purpose or 'illustration'
-    snapshot['identity']=re.sub(r'(?:long |short |blue-violet )*hair\b','',snapshot['identity']).strip(', ')
-    snapshot['identity']=re.sub(r',\s*,',',',snapshot['identity'])
-    snapshot['identity']+=', '+snapshot['hairstyle'] if snapshot['hairstyle'] else ''
+    if 'identity' not in overrides:
+        snapshot['identity']=re.sub(r'(?:long |short |blue-violet )*hair\b','',snapshot['identity']).strip(', ')
+        snapshot['identity']=re.sub(r',\s*,',',',snapshot['identity'])
+        snapshot['identity']+=', '+snapshot['hairstyle'] if snapshot['hairstyle'] else ''
     return snapshot
 
 
@@ -258,7 +266,7 @@ def build_tags(snapshot):
 
 
 def image_instruction(text,history=None):
-    if text.strip() in ('/取消','取消') or re.search(r'(?:取消|停止).{0,6}(?:画|图|拍|生成)|(?:别|不用|不要|先不)(?:再|继续|给我|帮我|替我|现在|着急)?(?:画|拍|生成|发图|出图)|(?:图|画|照片).{0,3}(?:别|不要|不用)(?:再|继续)?发',text):
+    if cancels_image(text):
         return 'cancel'
     if image_requested(text,history):
         return 'replace'
@@ -362,6 +370,8 @@ async def _inspect_image_once(http,content,snapshot,root,settings):
     body['messages'][0]['content']+=' 画风以expected_art_style/style为准：Comfort允许彩铅Q版小画，Comic允许Q版漫画；角色仍是设定中的成年人。shot_plan.stylization的natural是表达风格，不代表写实或禁止Q版。不能仅因既定Q版风格拒发，错误身份、手部畸形和实际场景冲突仍须拒发。'
     body['messages'][0]['content']+=' 必须另给findings数组，每个问题为{category:identity/scene/action/anatomy/style/composition,severity:minor/major,evidence:具体可见证据}，没有问题用[]。明显多手、多指、手与道具穿插、身份错误和核心动作相反属于major，不得在issues里承认后仍把所有布尔字段填true。逐条问题都要分级；不可见的细节不编造缺陷。先核对findings，再给一致的pass和各项布尔判断；有major或关键细节不确定就不通过。'
     body['messages'][0]['content']+=' 如果存在 render_target，动作、道具和服装的可见性以其 action/props/outfit/scope 为准；原始 action 和 creative_brief 中被镜头裁掉的部位仅为画外上下文，不因未出现而拒绝。state 仍用于核对角色、服装和地点的事实冲突。'
+    body['messages'][0]['content']+=' visual_overrides 中列出的临时画面设定以 render_target 对应字段为准，不用长期 state 覆盖；local_routine 的服装地点以快照 outfit/location 为准。若画面出现 visual_exclusions 中明确排除的物件，判为 scene/major。'
+    if 'visual_hour' in snapshot:body['messages'][0]['content']+=' 画中时段以 visual_hour 为准，local_time 记录的是创建任务的真实时间。'
     body['messages'][0]['content']+=' 景别按像素判断：extreme_wide为人物很小、环境占主导；wide为完整人物加较大环境；full必须从头到脚完整可见，坐姿也不能缺脚；medium为胸腰到头部；close为脸肩近景；detail为手或道具等局部主体。不要因计划写full就把缺脚的半身画填为full。'
     url=os.getenv('DEEPSEEK_BASE_URL','https://api.deepseek.com').rstrip('/')+'/chat/completions'
     try:

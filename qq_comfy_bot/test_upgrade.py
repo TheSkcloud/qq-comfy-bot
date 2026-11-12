@@ -104,13 +104,13 @@ class EntryTests(unittest.IsolatedAsyncioTestCase):
         current=datetime(2026,11,1,15,tzinfo=ZoneInfo('Asia/Shanghai'))
         s=self.instance.store.get(self.key);s['last_user_at']=(current-timedelta(hours=1)).isoformat();self.instance.store.save(self.key,s);self.instance.users={42}
         cfg={**bot.preferences.load(),'proactive_enabled':True,'drawing':d.config({'initiative':1})}
-        data=self.image_data();data['life_update']={'activity':'在房间读书','minutes':30};data['image_plan']={'kind':'life','evidence':'读书','relevance':1}
         self.instance.comfy.image=AsyncMock(return_value=b'image')
-        with patch.object(bot,'now',return_value=current),patch.object(bot.preferences,'load',return_value=cfg),patch.dict(os.environ,{'IMAGE_MODE':'auto'}),patch.object(bot,'deepseek',AsyncMock(return_value=data)) as model,patch.object(d,'inspect_image',AsyncMock(return_value={'pass':True})):
+        with patch.object(bot,'now',return_value=current),patch.object(bot.preferences,'load',return_value=cfg),patch.dict(os.environ,{'IMAGE_MODE':'auto'}),patch.object(bot,'deepseek',AsyncMock()) as model,patch.object(d,'inspect_image',AsyncMock(return_value={'pass':True})):
             await self.instance.initiative_tick()
             await asyncio.wait_for(asyncio.gather(*list(self.instance.tasks)),2)
             await self.instance.initiative_tick()
-        self.assertEqual(model.await_count,1)
+        model.assert_not_awaited()
+        self.instance.comfy.image.assert_awaited_once()
         history=self.instance.store.get(self.key)['history']
         self.assertEqual([m['role'] for m in history],['assistant'])
         self.assertEqual([m['type'] for m in self.packets[-1][1]['message']],['text','image'])
@@ -147,7 +147,9 @@ class EntryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_candidate_model_does_not_hold_chat_lock(self):
         current=datetime(2026,11,1,15,tzinfo=ZoneInfo('Asia/Shanghai'))
-        s=self.instance.store.get(self.key);s['last_user_at']=(current-timedelta(hours=1)).isoformat();self.instance.store.save(self.key,s);self.instance.users={42}
+        s=self.instance.store.get(self.key);s['last_user_at']=(current-timedelta(hours=1)).isoformat()
+        s['state']['location']='保存了但尚未编译绘图词的旧书店'
+        self.instance.store.save(self.key,s);self.instance.users={42}
         cfg={**bot.preferences.load(),'proactive_enabled':True,'drawing':d.config({'initiative':1})}
         started=asyncio.Event();release=asyncio.Event()
         async def model(*a,**k):started.set();await release.wait();return copy.deepcopy(self.data)

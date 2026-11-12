@@ -82,13 +82,14 @@ def plan(session,user,history,current,threshold=4):
 def should_think(decision):return decision['thinking']
 
 
-def context(decision):
+def context(decision, include_update=True):
     state=decision['state']
-    return ('讨论状态只用于承接对话，不是新的用户事实；Thinking不要求回复变长。'+json.dumps({
+    context=('讨论状态只用于承接对话，不是新的用户事实；Thinking不要求回复变长。'+json.dumps({
         'topic_id':state['topic_id'],'topic_summary':state.get('topic_summary',''),'completed_substantive_turns':state.get('substantive_turns',0),
         'important_context':state.get('important_context',[])[-12:],'resolved_questions':state.get('resolved_questions',[])[-6:],
-        'open_questions':state.get('open_questions',[])[-6:],'current_stage':decision['stage'],'transition_reason':decision['transition_reason']},ensure_ascii=False)+
-        '\n可在同一次输出提供dialogue_update:{relation:continue/switch/side/resume,topic_summary:简短讨论摘要,evidence:本轮用户原话连续片段,'
+        'open_questions':state.get('open_questions',[])[-6:],'current_stage':decision['stage'],'transition_reason':decision['transition_reason']},ensure_ascii=False))
+    if not include_update:return context
+    return (context+'\n可在同一次输出提供dialogue_update:{relation:continue/switch/side/resume,topic_summary:简短讨论摘要,evidence:本轮用户原话连续片段,'
         'important_context:[{speaker:user/assistant,text:观点短句,evidence:对应原话连续片段}],resolved_questions:[{question,answer,evidence:reply中的连续片段}],'
         'open_questions:[{question,evidence:用户原话或reply中的连续片段}]}。每个有实质内容的回复都判断话题关系，沿用也写continue及证据；摘要是讨论记录，不能把推测包装成用户事实。')
 

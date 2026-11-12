@@ -29,6 +29,8 @@ def prepare(root,snapshot):
         # Keep the deliberate chibi/manga canvas and mode semantics.
         mode=profiles.get(snapshot['style'],{}) if file.exists() else {}
         profile.update(width=mode.get('width',576),height=mode.get('height',832))
+    if any(field in snapshot.get('visual_overrides',[]) for field in ('identity','outfit')):
+        profile['reference']=False
     bank=Path(root)/'data'/'reference_anchors.json'
     anchor=json.loads(bank.read_text(encoding='utf-8')).get(signature(snapshot)) if bank.exists() else None
     if profile.get('reference') and anchor and Path(anchor['path']).is_file():
@@ -53,6 +55,7 @@ def prepare(root,snapshot):
 def prompt(snapshot,profile,legacy=''):
     from prompt_spec import build
     spec=build(snapshot)
+    spec.validate()
     profile['prompt_spec']=spec.record()
     return spec.positive()
 
@@ -85,6 +88,9 @@ async def apply(http,url,graph,profile):
     if profile.get('prompt_spec'):
         from prompt_spec import PromptSpec
         spec=PromptSpec(**profile['prompt_spec'])
+        spec.validate()
+        positive_node=art_styles.text_node(graph,sampler,'positive')
+        graph[positive_node]['inputs']['text']=spec.positive()
         graph[negative_node]['inputs']['text']=spec.negative(graph[negative_node]['inputs']['text'])
     else:
         # Compatibility for callers with a graph-only render config.

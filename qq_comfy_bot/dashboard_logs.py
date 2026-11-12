@@ -14,6 +14,7 @@ LABELS = {
     'withheld_quality': '质检拦截', 'ready_to_send': '等待发送', 'completed': '任务完成',
     'failed': '失败', 'cancelled': '已取消', 'outcome_unknown': '结果待确认',
     'collected': '收齐消息', 'context_ready': '上下文就绪', 'model_complete': '回复生成完成',
+    'chat_analysis_complete': '长对话分析完成', 'chat_analysis_failed': '长对话分析失败',
     'typing': '输入中', 'sent': '回复已发送', 'image_sent': '图片已发送',
     'superseded': '回复已替换', 'connection_change': '连接状态变化',
     'login_recovery': '登录恢复', 'supervisor_start': '管理器启动',
