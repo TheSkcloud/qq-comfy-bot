@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+import art_styles
 
 PROFILES = {
     'life':dict(steps=36,cfg=5.,reference=False,ref_guidance=1.5,ref_end=.65,ref_megapixels=.6,strength=.65),
@@ -22,6 +23,12 @@ def prepare(root,snapshot):
     if file.exists():
         profiles=json.loads(file.read_text(encoding='utf-8'))
         profile.update(profiles.get(snapshot['style'],{}))
+    style=art_styles.resolve(snapshot.get('art_style','original'))
+    profile.update(art_styles.settings(style))
+    if style!='original' and snapshot['style']!='life':
+        # Keep the deliberate chibi/manga canvas and mode semantics.
+        mode=profiles.get(snapshot['style'],{}) if file.exists() else {}
+        profile.update(width=mode.get('width',576),height=mode.get('height',832))
     bank=Path(root)/'data'/'reference_anchors.json'
     anchor=json.loads(bank.read_text(encoding='utf-8')).get(signature(snapshot)) if bank.exists() else None
     if profile.get('reference') and anchor and Path(anchor['path']).is_file():
@@ -43,52 +50,50 @@ def prepare(root,snapshot):
     return profile
 
 
-def prompt(snapshot,profile,legacy):
-    if snapshot['style']=='life':
-        from shot_director import guide_prompt
-        if snapshot.get('purpose')=='poster':legacy='character poster illustration, poster layout, character as the main subject, no lettering, '+legacy
-        return guide_prompt(snapshot,legacy)
-    if snapshot['style']=='comfort':
-        prefix='colored pencil drawing on cream textured paper, small hand-drawn comforting gift, chibi, simplified expressive linework, soft pastel colors, single panel, no lettering'
-    elif snapshot['style']=='comic':
-        prefix='playful single-panel manga, chibi proportions, expressive eyebrows, clearly drawn mouth, silly visual gag, expressive motion lines, clean ink drawing, no lettering'
-        if not re.search(r'open mouth|laugh|shout|scream',snapshot.get('emotion',''),re.I):
-            prefix+=', closed mouth, deadpan comic expression'
-    else:
-        prefix='masterpiece, best quality, detailed anime illustration, 1woman, solo, candid everyday moment'
-    # Explicit identity/outfit tags remain mandatory on this local fine-tune:
-    # the scene-only adapter recipe changed hair/eyes/outfit in actual trials.
-    parts=[prefix]
-    from shot_director import visible_identity,visible_outfit,visible_action,visible_emotion,visible_focus
-    parts.extend([visible_identity(snapshot),visible_outfit(snapshot)])
-    parts.extend([snapshot['setting_tags'],visible_action(snapshot),snapshot['props'],visible_emotion(snapshot),snapshot['camera']])
-    creative=snapshot.get('creative_brief',{})
-    parts.extend([creative.get('atmosphere',''),visible_focus(snapshot)])
-    hour=int(snapshot['local_time'][11:13])
-    parts.append('night, indoor warm lighting' if hour>=19 or hour<6 else 'daytime, natural lighting')
-    from shot_director import guide_prompt
-    return guide_prompt(snapshot,', '.join(p for p in parts if p))
+def prompt(snapshot,profile,legacy=''):
+    from prompt_spec import build
+    spec=build(snapshot)
+    profile['prompt_spec']=spec.record()
+    return spec.positive()
 
 
 async def apply(http,url,graph,profile):
-    graph=copy.deepcopy(graph)
+    graph=art_styles.graph_for(graph,profile.get('art_style','original'))
+    sampler=art_styles.node_id(graph,'KSampler')
+    latent=graph[sampler]['inputs']['latent_image'][0]
+    negative_node=art_styles.text_node(graph,sampler,'negative')
+    decode=art_styles.node_id(graph,'VAEDecode')
+    save=art_styles.node_id(graph,'SaveImage')
     width=int(profile.get('width',768));height=int(profile.get('height',1152))
-    if not (512<=width<=1536 and 512<=height<=2048 and width%64==0 and height%64==0):
-        raise ValueError('Render dimensions must be bounded multiples of 64')
+    if not (512<=width<=1536 and 512<=height<=2048 and width%16==0 and height%16==0):
+        raise ValueError('Render dimensions must be bounded multiples of 16')
     if profile.get('square_avatar'):height=width
-    graph['68']['inputs'].update(width=width,height=height)
+    graph[latent]['inputs'].update(width=width,height=height,batch_size=1)
     if not profile.get('upscale',False):
         # Save decoded native image; remove orphan upscaler nodes to avoid loading it.
-        graph['9']['inputs']['images']=['65',0]
-        for node in ('180','181','182'):graph.pop(node,None)
-    graph['70']['inputs'].update(steps=int(profile.get('steps',36)),cfg=float(profile.get('cfg',5)))
-    if profile.get('shot_plan') and '71' in graph:
+        graph[save]['inputs']['images']=[decode,0]
+        # Drop only nodes no longer reachable from outputs; custom node IDs are supported.
+        reachable=set()
+        def visit(key):
+            if key in reachable:return
+            reachable.add(key)
+            for v in graph[key]['inputs'].values():
+                if isinstance(v,list) and len(v)==2 and isinstance(v[0],str) and isinstance(v[1],int):visit(v[0])
+        visit(save)
+        graph={k:v for k,v in graph.items() if k in reachable}
+    graph[sampler]['inputs'].update(steps=int(profile.get('steps',36)),cfg=float(profile.get('cfg',5)))
+    if profile.get('prompt_spec'):
+        from prompt_spec import PromptSpec
+        spec=PromptSpec(**profile['prompt_spec'])
+        graph[negative_node]['inputs']['text']=spec.negative(graph[negative_node]['inputs']['text'])
+    else:
+        # Compatibility for callers with a graph-only render config.
         from shot_director import negative_tags
-        plan=profile['shot_plan']
-        negative=graph['71']['inputs']['text']
+        plan=profile.get('shot_plan',{})
+        negative=graph[negative_node]['inputs']['text']
         if plan.get('size') in ('detail','close','extreme_close'):
             negative=', '.join(t.strip() for t in negative.split(',') if t.strip()!='cropped')
-        graph['71']['inputs']['text']=', '.join(v for v in (negative,negative_tags(plan)) if v)
+        graph[negative_node]['inputs']['text']=negative+', '+art_styles.LAYOUT_NEGATIVE+', '+negative_tags(plan)
     if profile.get('reference'):
         import aiohttp
         path=Path(profile['reference_path'])
@@ -104,11 +109,11 @@ async def apply(http,url,graph,profile):
         image='/'.join(p for p in (uploaded.get('subfolder',''),uploaded['name']) if p)
         graph['201']={'class_type':'LoadImage','inputs':{'image':image}}
         # Sampling shift and all existing model/style LoRAs remain upstream.
-        model=graph['70']['inputs']['model']
+        model=graph[sampler]['inputs']['model']
         graph['202']={'class_type':'AnimaRefAdapter','inputs':{
-            'model':model,'vae':['63',0],'image':['201',0],
+            'model':model,'vae':graph[decode]['inputs']['vae'],'image':['201',0],
             'lora_name':'anima_ref_adapter_v2_r64.safetensors','ref_guidance':float(profile['ref_guidance']),
             'correction':'apg','strength':float(profile.get('strength',1.)),'ref_end':float(profile['ref_end']),
             'ref_megapixels':float(profile['ref_megapixels'])}}
-        graph['70']['inputs']['model']=['202',0]
-    return graph
+        graph[sampler]['inputs']['model']=['202',0]
+    return art_styles.add_detailer(graph,profile)

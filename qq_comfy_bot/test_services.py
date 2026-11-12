@@ -156,6 +156,20 @@ class LoginRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.responses['QQLogin/CheckLoginStatus']['data'] = state
             self.assertEqual(await services.recover_qq_login(self.http, self.config), 'pending')
         self.assertNotIn('QQLogin/SetQuickLogin', [name for name, body in self.calls])
+        self.assertNotIn('QQLogin/SetQuickLoginQQ', [name for name, body in self.calls])
+
+    async def test_qr_refresh_accepts_only_new_file_on_configured_port(self):
+        qr = self.root / 'cache' / 'qrcode.png'
+        qr.parent.mkdir()
+        qr.write_bytes(b'old')
+        self.responses['QQLogin/RefreshQRcode'] = {'code': 0}
+        async def write_after_ack(_):
+            qr.write_bytes(b'new-qr')
+        with patch.object(services.asyncio, 'sleep', write_after_ack):
+            self.assertEqual(await services.refresh_napcat_qr(self.http, self.config), qr)
+        with patch.object(services.asyncio, 'sleep', AsyncMock()):
+            with self.assertRaisesRegex(ValueError, 'fresh QR'):
+                await services.refresh_napcat_qr(self.http, self.config)
 
 
 class ConfigurationTests(unittest.TestCase):

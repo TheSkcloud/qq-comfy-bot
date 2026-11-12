@@ -1,3 +1,4 @@
+let qrVersion;
 const token=location.hash.slice(1)||sessionStorage.getItem('wanfeng-token')||'';
 if(token){sessionStorage.setItem('wanfeng-token',token);history.replaceState(null,'','/');}
 const $=id=>document.getElementById(id);
@@ -7,10 +8,10 @@ async function api(path,method='GET',data){const r=await fetch('/api/'+path,{met
 function weeksMatch(week,range){return range.split(',').some(s=>{const a=s.split('-').map(Number);return a.length===1?week===a[0]:week>=a[0]&&week<=a[1];});}
 async function loadSchedule(){const d=await api('timetable');$('schedule-title').textContent=`第 ${d.week} 周课程`;$('week-input').value=d.week;$('today-courses').textContent=d.courses.length?d.courses.map(c=>`${c.periods}节 · ${c.name}`).join('　/　'):'今天没有固定课表课程，不等于一定空闲。';const table=document.createElement('table'),head=document.createElement('tr');['星期一','星期二','星期三','星期四','星期五'].forEach(x=>{const t=document.createElement('th');t.textContent=x;head.appendChild(t);});table.appendChild(head);const row=document.createElement('tr');for(let day=0;day<5;day++){const cell=document.createElement('td');const items=d.all_courses.filter(c=>c.day===day&&weeksMatch(d.week,c.weeks));for(const c of items){const block=document.createElement('div');block.className='lesson';block.textContent=c.name;const small=document.createElement('small');small.textContent=`${c.periods}节 · ${c.room}`;block.appendChild(small);cell.appendChild(block);}if(!items.length)cell.textContent='—';row.appendChild(cell);}table.appendChild(row);$('schedule-table').replaceChildren(table);}
 function showDrawingState(d){const e=$('drawing-effective');if(!e||!d)return;e.textContent=`实际状态：全局模式 ${d.mode}；聊天随手图${d.spontaneous_enabled?'开启':'关闭'}；空闲主动分享${d.proactive_enabled?'开启':'关闭'}。明确要图始终可用。`;}
-async function refresh(){try{const d=await api('status');showDrawingState(d.drawing_effective);$('connection').textContent=d.qq?.startsWith('已在线')?'助手在线':'后台运行中';for(const k of ['qq','bot','comfy'])$(k).textContent=d[k]||'检查中';$('clock').textContent=d.hour;$('week').textContent=`第 ${d.week} 周`;$('weather-summary').textContent=d.weather.summary;$('degrees').textContent=d.weather.status==='ok'?`${d.weather.low}° — ${d.weather.high}°`:'—';$('weather-source').textContent=d.weather.status==='ok'?'今日预报已缓存 · 当天不重复请求':'成功后当天缓存 · 失败最多尝试五次';$('pref-autostart').checked=d.autostart;$('refresh-qr').style.display=d.need_qr?'inline-block':'none';if(d.need_qr){const r=await fetch('/api/qrcode',{headers:{Authorization:'Bearer '+token}});if(r.ok){if(qrUrl)URL.revokeObjectURL(qrUrl);qrUrl=URL.createObjectURL(await r.blob());$('qr').src=qrUrl;$('qr').style.display='block';}}else $('qr').style.display='none';}catch(e){$('connection').textContent='连接未就绪';toast(e.message);}}
+async function refresh(){try{const d=await api('status');showDrawingState(d.drawing_effective);$('connection').textContent=d.qq?.startsWith('已在线')?'助手在线':'后台运行中';for(const k of ['qq','bot','comfy'])$(k).textContent=d[k]||'检查中';$('clock').textContent=d.hour;$('week').textContent=`第 ${d.week} 周`;$('weather-summary').textContent=d.weather.summary;$('degrees').textContent=d.weather.status==='ok'?`${d.weather.low}° — ${d.weather.high}°`:'—';$('weather-source').textContent=d.weather.status==='ok'?'今日预报已缓存 · 当天不重复请求':'成功后当天缓存 · 失败最多尝试五次';$('pref-autostart').checked=d.autostart;$('refresh-qr').style.display=d.qq?.startsWith('已在线')?'none':'inline-block';if(d.need_qr){if(qrVersion===d.qr_version&&qrUrl){$('qr').style.display='block';return;}const r=await fetch('/api/qrcode',{headers:{Authorization:'Bearer '+token}});if(r.ok){if(qrUrl)URL.revokeObjectURL(qrUrl);qrUrl=URL.createObjectURL(await r.blob());qrVersion=d.qr_version;$('qr').src=qrUrl;$('qr').style.display='block';}}else $('qr').style.display='none';}catch(e){$('connection').textContent='连接未就绪';toast(e.message);}}
 async function loadJournal(){const d=await api('journal');const host=$('journal-list');host.className='';host.replaceChildren();if(!d.entries.length){host.className='empty';host.textContent='还没有值得记录的变化。';return;}const labels={location:'地点',activity:'活动',preference:'偏好',plan:'计划',basic_fact:'基本信息'};for(const e of d.entries){const item=document.createElement('div');item.className='journalitem';const time=document.createElement('time');time.textContent=e.at.replace('T',' ')+' · '+(labels[e.kind]||e.kind);const p=document.createElement('p');p.textContent=e.previous?`${e.previous} → ${e.value}`:e.value;item.append(time,p);host.append(item);}}
 async function loadPreferences(){const p=await api('preferences');$('pref-proactive').checked=p.proactive_enabled===true;$('pref-romance').value=p.romance_mode||'slow';$('pref-spontaneous').checked=p.spontaneous_images!==false;$('pref-reactions').checked=p.reactions;$('pref-notes').checked=p.notes_auto;for(const [k,v] of Object.entries(p.drawing||{})){const e=$('draw-'+k);if(e)e.value=v;}}
-document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',async()=>{document.querySelectorAll('nav button,.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(b.dataset.page).classList.add('active');window.scrollTo({top:0,behavior:'auto'});try{if(b.dataset.page==='journal')await loadJournal();if(b.dataset.page==='schedule')await loadSchedule();}catch(e){toast(e.message);}}));
+document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',async()=>{document.querySelectorAll('nav button,.page').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(b.dataset.page).classList.add('active');window.scrollTo({top:0,behavior:'auto'});try{if(b.dataset.page==='logs')await loadLogs();if(b.dataset.page==='journal')await loadJournal();if(b.dataset.page==='schedule')await loadSchedule();}catch(e){toast(e.message);}}));
 $('save-prefs').onclick=async()=>{try{const saved=await api('preferences','POST',{proactive_enabled:$('pref-proactive').checked,romance_mode:$('pref-romance').value,spontaneous_images:$('pref-spontaneous').checked,reactions:$('pref-reactions').checked,notes_auto:$('pref-notes').checked,drawing:Object.fromEntries([...document.querySelectorAll('[id^=draw-]')].map(e=>[e.id.slice(5),e.tagName==='SELECT'?e.value:Number(e.value)]))});showDrawingState(saved.drawing_effective);toast(saved.drawing_effective?.reason==='global_mode_off'?'偏好已保存；全局自动绘图仍关闭。':'偏好已保存，实际状态已更新。');}catch(e){toast(e.message);}};
 $('pref-autostart').onchange=async()=>{try{await api('autostart','POST',{enabled:$('pref-autostart').checked});toast('启动设置已更新。');}catch(e){toast(e.message);}};
 $('save-week').onclick=async()=>{try{await api('week','POST',{week:Number($('week-input').value)});await loadSchedule();await refresh();toast('教学周已校正。');}catch(e){toast(e.message);}};
@@ -20,3 +21,35 @@ $('quit').onclick=async()=>{if(!confirm('退出助手后台？QQ 和 ComfyUI 不
 Promise.all([refresh(),loadSchedule(),loadPreferences()]).catch(e=>toast(e.message));setInterval(refresh,15000);
 
 $('refresh-qr').onclick=async()=>{const b=$('refresh-qr');b.disabled=true;try{await api('refresh-qr','POST',{});await refresh();toast('二维码已刷新，请立即扫码。');}catch(e){toast(e.message);}finally{b.disabled=false;}};
+
+const logCategory = {drawing: '绘图', reply: '消息', login: '登录'};
+let logRequest = 0;
+async function loadLogs() {
+    const request = ++logRequest;
+    const stream = $('log-stream').value;
+    const {entries} = await api(`logs?stream=${encodeURIComponent(stream)}`);
+    if (request !== logRequest) return;
+    const container = $('log-entries');
+    container.replaceChildren();
+    container.className = entries.length ? '' : 'empty';
+    if (!entries.length) container.textContent = '暂无该类型日志。';
+    for (const event of entries) {
+        const entry = document.createElement('div');
+        entry.className = 'journalitem';
+        const time = document.createElement('time');
+        time.textContent = `${event.at.slice(0, 19).replace('T', ' ')} · ${logCategory[event.category]}`;
+        const text = document.createElement('p');
+        text.textContent = [event.label, event.task, event.reason, event.phase,
+            event.elapsed_ms === null ? '' : `${(event.elapsed_ms / 1000).toFixed(2)} 秒`].filter(Boolean).join(' · ');
+        entry.append(time, text);
+        container.append(entry);
+    }
+    $('log-status').textContent = `最近 ${entries.length} 条 · 北京时间 · 每 4 秒刷新`;
+}
+function refreshLogs() {
+    loadLogs().catch(() => { $('log-status').textContent = '读取日志失败，稍后自动重试。'; });
+}
+$('refresh-logs').onclick = refreshLogs;
+$('log-stream').onchange = refreshLogs;
+setInterval(() => { if ($('logs').classList.contains('active') && !document.hidden) refreshLogs(); }, 4000);
+

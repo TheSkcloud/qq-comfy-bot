@@ -35,6 +35,7 @@ class Supervisor:
         self.next_login_attempt = 0
         self.login_needs_qr = False
         self.last_qq_state = None
+        self.last_recovery = None
         login_checkpoint.record(ROOT,self.config,'supervisor_start','starting')
 
     def start_bot(self):
@@ -71,6 +72,8 @@ class Supervisor:
                             self.napcat_process = services.spawn(command, self.config['napcat_dir'], 'napcat-startup.log', env)
                             self.next_napcat_attempt = time.monotonic() + 120
                             self.qr_started = time.time()
+                            self.login_needs_qr = False
+                            self.last_recovery = None
                             self.next_login_attempt = time.monotonic() + 30
                             self.emit('qq', '正在使用已保存账号快捷登录…')
                         else:
@@ -79,13 +82,21 @@ class Supervisor:
                                 diagnostics={}
                                 recovery = await services.recover_qq_login(http, self.config,diagnostics)
                                 self.login_needs_qr = recovery == 'needs_qr'
+                                self.last_recovery = recovery
                                 login_checkpoint.record(ROOT,self.config,'login_recovery',recovery,**diagnostics)
                                 logging.info('QQ 登录恢复：%s', recovery)
-                            self.emit('qq', 'QQ 登录凭据已失效，请扫码一次更新登录' if self.login_needs_qr
-                                      else '正在等待网络恢复并复用已保存登录…')
+                            recovery_labels = {
+                                'needs_qr': 'QQ 需要重新登录，请扫码',
+                                'pending': 'QQ 正在登录或重连，等待 OneBot 就绪',
+                                'manual_auth': '请在 NapCat 管理页完成验证',
+                            }
+                            self.emit('qq', recovery_labels.get(self.last_recovery, '正在等待 QQ 连接…'))
                         qr = Path(self.config['napcat_dir']) / 'cache' / 'qrcode.png'
-                        if qr.is_file() and qr.stat().st_mtime >= max(self.qr_started, self.last_online):
-                            self.emit('qr', str(qr))
+                        try:
+                            qr_fresh = qr.stat().st_mtime >= max(self.qr_started, self.last_online)
+                        except OSError:
+                            qr_fresh = False
+                        self.emit('qr', str(qr) if qr_fresh else '')
                     comfy = await services.comfy_ready(http, os.getenv('COMFYUI_URL', 'http://127.0.0.1:8188'))
                     self.emit('comfy', '已运行' if comfy else '待命 · 需要画图时自动启动')
                     self.emit('bot', '运行中' if services.bot_running() else '启动失败，查看日志')
