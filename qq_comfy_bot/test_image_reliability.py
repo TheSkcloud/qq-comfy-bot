@@ -302,14 +302,15 @@ class LatencyTests(unittest.TestCase):
 
 
 class ContextLatencyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cold_casual_chat_does_not_prepare_routine_or_notes(self):
+    async def test_cold_casual_chat_does_not_fetch_weather_routine_or_notes(self):
         from context_engine import ContextEngine
         with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ,{'CONTEXT_ENABLED':'1'}):
             engine=ContextEngine(folder)
+            engine.weather.ensure=AsyncMock(side_effect=AssertionError('weather on small talk'))
             engine.routine.ensure=AsyncMock(side_effect=AssertionError('routine on small talk'))
             engine.personality=AsyncMock(side_effect=AssertionError('notes on small talk'))
             await engine.build(object(),'42','这个说法挺有意思',bot.now(),True,bot.DEFAULT['character'])
-            engine.routine.ensure.assert_not_called();engine.personality.assert_not_called()
+            engine.weather.ensure.assert_not_called();engine.routine.ensure.assert_not_called();engine.personality.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

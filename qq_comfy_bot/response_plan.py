@@ -31,7 +31,7 @@ def decode(content, force_image=False):
                 '_model_format':'plain_text_recovered'}
 
 
-def normalize(data, state, user, force_image=False):
+def normalize(data, state, user, force_image=False,allow_local_memory=True):
     """Repair optional bookkeeping locally; never spend a request to fix absent metadata."""
     import re
     from visual_brief import validate_brief
@@ -80,9 +80,21 @@ def normalize(data, state, user, force_image=False):
     waiting=data.get('waiting_lines',[])
     data['waiting_lines']=list(dict.fromkeys(line.strip() for line in waiting if isinstance(line,str) and 0<len(line.strip())<=65))[:3] if isinstance(waiting,list) else []
     updates=data.get('memory_updates',[])
+    data['_memory_extraction']={'status':'missing' if 'memory_updates' not in data else 'evaluated' if isinstance(updates,list) else 'invalid_type',
+        'proposed':len(updates) if isinstance(updates,list) else 0,
+        'normalization_rejected':sum(not isinstance(item,dict) for item in updates)+max(0,sum(isinstance(item,dict) for item in updates)-4) if isinstance(updates,list) else 0}
     data['memory_updates']=[item for item in updates if isinstance(item,dict)][:4] if isinstance(updates,list) else []
     if social['intent']=='teasing':
+        data['_memory_extraction'].update(status='teasing_filtered',normalization_rejected=data['_memory_extraction']['proposed'])
         data['memory_updates']=[]  # Quoted/mimicked speech is not a reliable user fact.
+    if (allow_local_memory and not force_image and social['intent']!='teasing' and not data['memory_updates']
+            and data['_memory_extraction']['status'] in ('missing','evaluated') and not data['_memory_extraction']['normalization_rejected']
+            and not data.get('_text_only_recovery') and not data.get('_model_format')):
+        quote=user.strip().rstrip('。！!')
+        if (re.fullmatch(r'我(?:更|一直|最)?(?:喜欢|不喜欢|讨厌|偏好)[^？?\n]{1,145}',quote)
+                and not re.search(r'如果|假如|假设|开玩笑|模仿|反话|据说|骗|假的|不是说|[“”「」"\']|(?:吗|么)$',quote)):
+            data['memory_updates']=[{'kind':'preference','value':quote,'evidence':quote}]
+            data['_memory_extraction'].update(local_fallback='verbatim_preference',local_proposed=1)
     data['affect']=data.get('affect') if isinstance(data.get('affect'),dict) else {}
     return data
 

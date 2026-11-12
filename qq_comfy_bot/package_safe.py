@@ -2,7 +2,7 @@
 import argparse, re, zipfile
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
-JSON_FILES={'character_card.json','preferences.json','render_profiles.json','workflow.json','workflow_h_api.json','workflow_h_before_detail_api.json'}
+JSON_FILES={'character_card.json','preferences.json','render_profiles.json','timetable.json','workflow.json','workflow_h_api.json','workflow_h_before_detail_api.json'}
 
 def sources(root=ROOT):
     for path in root.iterdir():

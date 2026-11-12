@@ -185,9 +185,10 @@ def napcat_running(config):
     return False
 
 
-async def recover_qq_login(http, config):
+async def recover_qq_login(http, config, diagnostics=None):
     """Reuse QQ's saved ticket through local NapCat; never use passwords or log tokens."""
     import hashlib
+    diagnostics=diagnostics if diagnostics is not None else {}
     try:
         web = json.loads((Path(config['napcat_dir']) / 'config' / 'webui.json').read_text(encoding='utf-8-sig'))
         if web.get('enable2FA'):
@@ -216,6 +217,7 @@ async def recover_qq_login(http, config):
         if status.get('code') != 0:
             return 'unavailable'
         state = status.get('data') or {}
+        diagnostics.update(login_phase=str(state.get('loginPhase','unknown'))[:50],is_login=bool(state.get('isLogin')),qr_accepted=bool(state.get('qrLoginAccepted')))
         # Let the kernel finish reconnecting and never switch an already logged-in account.
         if state.get('isLogin') or state.get('loginPhase') in ('reconnecting','qrcode_scanned','initializing') or state.get('qrLoginAccepted'):
             return 'pending'
@@ -224,12 +226,15 @@ async def recover_qq_login(http, config):
         # Read the actual kernel failure first. The quick-login list is a filtered,
         # cached UI snapshot, not authoritative evidence that no valid ticket exists.
         if requires_scan(state.get('loginError','')):
+            diagnostics['failure_category']='ticket_invalid_requires_qr'
             return 'needs_qr'
         result = await call('QQLogin/SetQuickLogin', {'uin': account}, headers)
+        diagnostics['recovery_action']='quick_login_saved_account'
         if result.get('code') == 0:
             return 'pending'
         # Network/kernel initialization failures must not permanently disable recovery.
         message=result.get('message') or result.get('msg','')
         return 'needs_qr' if requires_scan(message) else 'unavailable'
-    except (OSError, KeyError, ValueError, TypeError, aiohttp.ClientError, asyncio.TimeoutError):
+    except (OSError, KeyError, ValueError, TypeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        diagnostics['error_type']=type(exc).__name__
         return 'unavailable'

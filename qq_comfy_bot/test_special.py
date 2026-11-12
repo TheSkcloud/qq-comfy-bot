@@ -43,7 +43,7 @@ class EntryTests(unittest.IsolatedAsyncioTestCase):
         spoken['image_value']={'suitable':True,'kind':'comic','reason':'用漫画接住用户的模仿互动'}
         plan=self.image_data();plan['image_caption']='这回轮到我了。'
         model=AsyncMock(side_effect=[spoken,plan]);self.instance.comfy.image=AsyncMock(return_value=b'comic')
-        cfg={**bot.preferences.load(),'drawing':d.config({'initiative':0,'comic':0})}
+        cfg={**bot.preferences.load(),'drawing':d.config({'initiative':1,'comic':1})}
         with patch.dict(os.environ,{'IMAGE_MODE':'auto'}),patch.object(bot.preferences,'load',return_value=cfg),patch.object(bot,'deepseek',model),patch.object(d,'inspect_image',AsyncMock(return_value={'pass':True})):
             self.instance.enqueue(self.event,self.key,'我刚刚是在模仿你说话啦')
             await self.workers()
@@ -170,7 +170,8 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(first.location,self.session['state']['location'])
         data={'_candidate':first.data()}
         decision=d.decide(self.session,'',data,self.current,{'initiative':0})
-        self.assertTrue(decision['allowed'])
+        self.assertFalse(decision['allowed']);self.assertEqual(decision['reason'],'initiative_gate')
+        self.assertTrue(d.decide(self.session,'',data,self.current,{'initiative':1})['allowed'])
         self.session['candidate_attempts']=[first.dedupe_key]
         self.assertEqual(d.decide(self.session,'',data,self.current,{})['reason'],'event_already_attempted')
 

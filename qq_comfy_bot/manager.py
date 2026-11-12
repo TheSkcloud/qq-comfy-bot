@@ -52,7 +52,8 @@ class Supervisor:
                     state = await services.qq_status(http, os.environ.get('NAPCAT_WS_URL', 'ws://127.0.0.1:3001'),
                                                      os.environ.get('NAPCAT_TOKEN', ''), self.config['bot_qq'])
                     if state!=self.last_qq_state:
-                        login_checkpoint.record(ROOT,self.config,'connection_change',state)
+                        login_checkpoint.record(ROOT,self.config,'connection_change',state,previous_state=self.last_qq_state,
+                            worker_exit_code=self.napcat_process.poll() if self.napcat_process else None)
                         self.last_qq_state=state
                     if state == 'online':
                         self.emit('qq', '已在线')
@@ -75,9 +76,10 @@ class Supervisor:
                         else:
                             if not self.login_needs_qr and time.monotonic() >= self.next_login_attempt:
                                 self.next_login_attempt = time.monotonic() + 120
-                                recovery = await services.recover_qq_login(http, self.config)
+                                diagnostics={}
+                                recovery = await services.recover_qq_login(http, self.config,diagnostics)
                                 self.login_needs_qr = recovery == 'needs_qr'
-                                login_checkpoint.record(ROOT,self.config,'login_recovery',recovery)
+                                login_checkpoint.record(ROOT,self.config,'login_recovery',recovery,**diagnostics)
                                 logging.info('QQ 登录恢复：%s', recovery)
                             self.emit('qq', 'QQ 登录凭据已失效，请扫码一次更新登录' if self.login_needs_qr
                                       else '正在等待网络恢复并复用已保存登录…')

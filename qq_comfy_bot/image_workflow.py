@@ -59,11 +59,11 @@ def prompt(snapshot,profile,legacy):
     # Explicit identity/outfit tags remain mandatory on this local fine-tune:
     # the scene-only adapter recipe changed hair/eyes/outfit in actual trials.
     parts=[prefix]
-    from shot_director import visible_identity,visible_outfit,visible_action,visible_emotion
+    from shot_director import visible_identity,visible_outfit,visible_action,visible_emotion,visible_focus
     parts.extend([visible_identity(snapshot),visible_outfit(snapshot)])
     parts.extend([snapshot['setting_tags'],visible_action(snapshot),snapshot['props'],visible_emotion(snapshot),snapshot['camera']])
     creative=snapshot.get('creative_brief',{})
-    parts.extend([creative.get('atmosphere',''),creative.get('focal_point','')])
+    parts.extend([creative.get('atmosphere',''),visible_focus(snapshot)])
     hour=int(snapshot['local_time'][11:13])
     parts.append('night, indoor warm lighting' if hour>=19 or hour<6 else 'daytime, natural lighting')
     from shot_director import guide_prompt

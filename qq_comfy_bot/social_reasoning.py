@@ -100,6 +100,20 @@ def remember(session,data,current):
 def grounding_issues(reply,text,history):
     # Only high-confidence additions about real causes/actors, not general technical explanations.
     source='\n'.join(m.get('content','') for m in history[-6:] if m.get('role')=='user')+'\n'+text
-    if local_emotion(text,history)=='neutral':return []
-    unsupported=[word for word in ('评审','导师','课题','资源','名额','当场') if word in reply and word not in source]
-    return ['未提供依据的现实原因/细节：'+','.join(unsupported)] if unsupported else []
+    issues=[]
+    # A concrete past effort must not be invented even in an upbeat achievement reply.
+    effort=r'熬.{0,4}夜|通宵|没睡|失眠'
+    for clause in re.split(r'[。！？!?\n]',reply):
+        if re.search(r'如果|假如|要是|可能|建议|不要|别再',clause):continue
+        if re.search(r'(?:^|[，,])我',clause) and '你' not in clause:continue
+        if re.search(r'你|之前|先前|那些|这几天|当时',clause) and re.search(effort,clause) and not re.search(effort,source):
+            issues.append('未提供依据的用户过往经历：'+clause[:120])
+    if local_emotion(text,history)!='neutral':
+        unsupported=[word for word in ('评审','导师','课题','资源','名额','当场') if word in reply and word not in source]
+        if unsupported:issues.append('未提供依据的现实原因/细节：'+','.join(unsupported))
+    return issues
+
+def safe_grounded_reply(reply,text,history):
+    clauses=[part.strip() for part in re.split(r'(?<=[。！？!?])|\n',reply) if part.strip()]
+    kept=[part for part in clauses if not grounding_issues(part,text,history)]
+    return ''.join(kept) or '具体缘由我还不清楚。'

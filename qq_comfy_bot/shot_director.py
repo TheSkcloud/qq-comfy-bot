@@ -1,6 +1,7 @@
 """Activity-aware camera selection; never changes character, outfit or life state."""
 import copy
 import re
+import time
 
 DIMENSIONS = {
     'size': ('extreme_wide', 'wide', 'full', 'medium', 'close', 'extreme_close', 'detail'),
@@ -80,12 +81,21 @@ def choose(snapshot, request='', history=()):
     if snapshot.get('purpose')=='poster' and 'size' not in locked:
         suitable=[s for s in suitable if s['size'] in ('full','medium','close')]
     recent=list(history)[-12:]
+    recent_hand_failure=any(item.get('plan',{}).get('size')=='detail' and item.get('anatomy_ok') is False
+        and 0<=time.time()-item.get('at',0)<86400
+        and (not item.get('character_id') or not snapshot.get('character_id') or item['character_id']==snapshot['character_id']) for item in recent[-4:])
+    avoid_failed_hands=recent_hand_failure and 'size' not in locked and not fixed
     def score(shot):
         points=sum(100 for k,v in locked.items() if shot[k]==v)
         points+=3 if shot['activities'] and any(w in activity for w in shot['activities']) else 0
         focus=str(creative.get('focal_point','')).lower()
-        if re.search(r'hand|finger|page corner|pen tip|paper edge',focus) and shot['size']=='detail':points+=6
-        if re.search(r'face|gaze|eyes|expression',focus) and shot['size'] in ('close','extreme_close'):points+=4
+        fine_action=bool(re.search(r'fingertip|page corner|pen tip|paper edge|handwriting|grip',focus))
+        face_focus=bool(re.search(r'face|gaze|eyes|expression|glanc|smirk|smile|eyebrow|chin',focus))
+        hand_focus=bool(re.search(r'hand|finger',focus)) and (fine_action or not face_focus)
+        if hand_focus and shot['size']=='detail':points+=6
+        if avoid_failed_hands and shot['size']=='detail':points-=1000
+        if face_focus and not fine_action and shot['size']=='detail':points-=8
+        if face_focus and shot['direction'] not in ('back','over_shoulder') and shot['size'] in ('close','extreme_close'):points+=6
         if re.search(r'entire room|environment|window light',focus) and shot['size'] in ('wide','extreme_wide'):points+=4
         if re.search(r'dance|balance|body motion|skirt movement',focus) and shot['size']=='full':points+=5
         if style=='comfort' and shot['size'] in ('medium','close'):points+=4
@@ -102,6 +112,7 @@ def choose(snapshot, request='', history=()):
     selected.pop('activities');selected.pop('styles')
     selected['user_locked']=locked
     selected['reason']='user camera constraints' if locked or fixed or avatar else 'activity/style suitability, then recent twelve compositions'
+    if avoid_failed_hands:selected.update(avoided_recent_hand_failure=True,reason='avoid recent hand anatomy failure; retain user camera overrides')
     if creative:selected['creative_focal_point']=creative.get('focal_point','')
     # A lock is a complete override; do not retain contradictory template camera words.
     if locked:
@@ -131,6 +142,7 @@ def history_entry(snapshot, qa, render, task_id):
     observed=qa.get('composition',{})
     actual={k:v for k,v in observed.items() if k in DIMENSIONS and v in DIMENSIONS[k]} if isinstance(observed,dict) else {}
     return dict(image_task_id=task_id, plan=copy.deepcopy(snapshot.get('shot_plan',{})), actual=actual,
+                at=time.time(),character_id=snapshot.get('character_id'),quality_pass=qa.get('pass') is True,anatomy_ok=qa.get('anatomy_ok'),
                 observation_source='vision' if actual else 'unavailable', visible=qa.get('visible',''),
                 aspect_ratio=[render.get('width'),render.get('height')])
 
@@ -174,16 +186,23 @@ def visible_action(snapshot):
     action=snapshot.get('action','')
     if snapshot.get('shot_plan',{}).get('size')=='detail':
         action=re.sub(r'(?:sitting|standing|seated)[^,]*,?\s*','',action,flags=re.I)
+        action=visible_focus(snapshot,action)
     return action
 
 
 def visible_outfit(snapshot):
     outfit=snapshot['outfit_tags']
     if snapshot.get('shot_plan',{}).get('size')=='detail':
-        outfit=', '.join(t.strip() for t in outfit.split(',') if not re.search(r'skirt|pants|trousers|shoes|boots|stockings',t,re.I))
+        outfit=', '.join(t.strip() for t in outfit.split(',') if not re.search(r'\b(?:skirt|pants|trousers|shorts|shoes|boots|stockings|slippers|socks)\b',t,re.I))
         outfit+=' sleeves visible at wrists'
     return outfit
 
 
 def visible_emotion(snapshot):
     return snapshot.get('emotion','') if snapshot.get('shot_plan',{}).get('expectations',{}).get('face_expected',True) else ''
+
+def visible_focus(snapshot,value=None):
+    value=value if value is not None else snapshot.get('creative_brief',{}).get('focal_point','')
+    if snapshot.get('shot_plan',{}).get('size')!='detail':return value
+    parts=re.split(r',|\band\b',value,flags=re.I)
+    return ', '.join(part.strip() for part in parts if part.strip() and not re.search(r'\b(?:face|eyes?|gaze|head|smile|smirk|looking|eyebrows?|lips)\b',part,re.I))

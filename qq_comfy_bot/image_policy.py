@@ -42,6 +42,9 @@ def image_requested(text, history=None):
         return True
     if re.search(r'(?:不要|别|不用|不想|不需要|先不|别再|不聊|不说|不看).{0,8}(?:图|照片|拍照|拍张照|画|给我看|看你|看|海报)', text):
         return False
+    if re.search(r'(?:不要|别|不用|不想|不需要|先不).{0,8}自拍',text):return False
+    if not re.search(r'我(?:正在|在)画画|(?:源码|代码|函数|算法)',text) and re.search(
+            r'(?:发|来|给我|拍|画).{0,10}(?:自拍|近照|肖像|插画)|(?:发|来|给我).{0,6}(?:一|两|二|三)?(?:张|幅)(?:图|画|照片)',text):return True
     strong=bool(re.search(r'画(?:一|两|二|三|个|张|幅|点)|发.{0,3}(?:图|照片)|拍.{0,3}(?:照|相)',text))
     # A short imagined view can omit both "show me" and a question mark.
     # Keep this narrow: named role + visible activity + appearance, without an
@@ -110,8 +113,15 @@ def scene_tags(tags, hour, character=''):
     for tag in tags.split(','):
         tag = tag.strip()
         low = tag.lower()
-        if not tag or any(word in low for word in temporal):
-            continue
+        if not tag:continue
+        if any(re.search(r'\b'+re.escape(word)+r'\b',low) for word in temporal):
+            # Keep place nouns in combined clauses such as "home kitchen in the evening".
+            if re.search(r'\b(?:room|kitchen|entryway|genkan|street|sidewalk|bedroom|studio|door|desk|window|garden|park)\b',low):
+                tag=re.sub(r'\b(?:(?:in|at|during)\s+(?:the\s+)?)?(?:early morning|late night|'+ '|'.join(re.escape(word) for word in temporal)+r')\b','',tag,flags=re.I)
+                tag=re.sub(r'\s+',' ',tag).strip(' ,')
+                low=tag.lower()
+                if not tag:continue
+            else:continue
         if identity and re.search(r'\b(?:hair|eyes)\b', low):
             continue
         if low not in {value.lower() for value in clean}:
