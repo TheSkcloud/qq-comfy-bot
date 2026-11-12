@@ -72,6 +72,20 @@ class WeatherTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScheduleTests(unittest.TestCase):
+    def setUp(self):
+        sample = {
+            'anchor_date': '2026-10-26',
+            'anchor_week': 8,
+            'note': '',
+            'courses': [
+                dict(day=2, weeks='1-18', part='morning', name='A', room='A'),
+                dict(day=2, weeks='1-18', part='afternoon', name='B', room='B'),
+                dict(day=2, weeks='1-18', part='evening', name='C', room='C'),
+                dict(day=1, weeks='8-9', part='evening', name='示例实验课', room='示例实验室1'),
+            ],
+        }
+        self.enterContext(patch.object(schedule, 'load', return_value=sample))
+
     def test_week_anchor_advances_on_monday(self):
         self.assertEqual(schedule.week_number(NOW.date()),8)
         self.assertEqual(schedule.week_number(datetime(2026,11,1).date()),8)
@@ -80,7 +94,7 @@ class ScheduleTests(unittest.TestCase):
     def test_week_eight_wednesday_and_alternating_monday(self):
         data=schedule.today(NOW)
         self.assertEqual(len(data['courses']),3)
-        self.assertIn('示例语言课',data['possible'])
+        self.assertIn('B',data['possible'])
         self.assertTrue(data['uncertain'])
         self.assertFalse(schedule.in_weeks(6,'1-3,5,7,8-15'))
         self.assertTrue(schedule.in_weeks(8,'1-3,5,7,8-15'))

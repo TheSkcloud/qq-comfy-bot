@@ -6,7 +6,10 @@ PATH = Path(__file__).with_name('timetable.json')
 
 
 def load():
-    return json.loads(PATH.read_text(encoding='utf-8'))
+    try:
+        return json.loads(PATH.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {'anchor_date': date.today().isoformat(), 'anchor_week': 1, 'courses': [], 'note': ''}
 
 
 def in_weeks(week, expression):

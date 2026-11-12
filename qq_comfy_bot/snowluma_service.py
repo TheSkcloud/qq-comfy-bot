@@ -14,7 +14,10 @@ RUN_NAME = 'WanfengSnowLuma'
 
 
 def installation():
-    config = services.settings()
+    try:
+        config = services.settings()
+    except FileNotFoundError:
+        return None
     path = config.get('snowluma_dir')
     return Path(path).resolve() if path else None
 
