@@ -35,6 +35,7 @@ class Supervisor:
         self.next_login_attempt = 0
         self.login_needs_qr = False
         self.last_qq_state = None
+        self.last_recovery = None
         login_checkpoint.record(ROOT,self.config,'supervisor_start','starting')
 
     def start_bot(self):
@@ -64,28 +65,19 @@ class Supervisor:
                         self.last_online = time.time()
                     elif state in ('wrong_account', 'token_error'):
                         self.emit('qq', '连接账号不符' if state == 'wrong_account' else 'token 不匹配，请检查配置')
-                    else:
-                        # Never kill QQ or launch another instance every polling cycle.
-                        if time.monotonic() >= self.next_napcat_attempt and not await asyncio.to_thread(services.napcat_running, self.config):
-                            command, env = services.napcat_command(self.config)
-                            self.napcat_process = services.spawn(command, self.config['napcat_dir'], 'napcat-startup.log', env)
-                            self.next_napcat_attempt = time.monotonic() + 120
-                            self.qr_started = time.time()
-                            self.next_login_attempt = time.monotonic() + 30
-                            self.emit('qq', '正在使用已保存账号快捷登录…')
+                    else:  # SnowLuma is the sole managed transport.
+                        import snowluma_service
+                        snow = await asyncio.to_thread(snowluma_service.status)
+                        if not snow['available']:
+                            label = '找不到 SnowLuma 安装，请检查启动配置'
+                        elif not snow['running']:
+                            label = 'SnowLuma 已停止，请在设置中开启「运行 SnowLuma」'
+                        elif state == 'offline':
+                            label = 'SnowLuma 已运行，请登录机器人 QQ'
                         else:
-                            if not self.login_needs_qr and time.monotonic() >= self.next_login_attempt:
-                                self.next_login_attempt = time.monotonic() + 120
-                                diagnostics={}
-                                recovery = await services.recover_qq_login(http, self.config,diagnostics)
-                                self.login_needs_qr = recovery == 'needs_qr'
-                                login_checkpoint.record(ROOT,self.config,'login_recovery',recovery,**diagnostics)
-                                logging.info('QQ 登录恢复：%s', recovery)
-                            self.emit('qq', 'QQ 登录凭据已失效，请扫码一次更新登录' if self.login_needs_qr
-                                      else '正在等待网络恢复并复用已保存登录…')
-                        qr = Path(self.config['napcat_dir']) / 'cache' / 'qrcode.png'
-                        if qr.is_file() and qr.stat().st_mtime >= max(self.qr_started, self.last_online):
-                            self.emit('qr', str(qr))
+                            label = 'SnowLuma 已运行，等待 OneBot 连接'
+                        self.emit('qq', label)
+                        self.emit('qr', '')
                     comfy = await services.comfy_ready(http, os.getenv('COMFYUI_URL', 'http://127.0.0.1:8188'))
                     self.emit('comfy', '已运行' if comfy else '待命 · 需要画图时自动启动')
                     self.emit('bot', '运行中' if services.bot_running() else '启动失败，查看日志')

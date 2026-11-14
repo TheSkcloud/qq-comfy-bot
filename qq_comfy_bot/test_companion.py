@@ -110,18 +110,18 @@ class RecallTests(unittest.TestCase):
     def test_exact_forget_removes_fact_journal_and_old_value(self):
         with tempfile.TemporaryDirectory() as folder:
             service = Life(folder)
-            for value in ('广州', '北京'):
+            for value in ('太原', '北京'):
                 text = '我在'+value
                 service.record('42', [{'kind':'location','value':value,'evidence':text}], text, NOW)
-            text = '我在广州'
-            service.record('99', [{'kind':'location','value':'广州','evidence':text}], text, NOW)
-            service.forget('42', '广州')
+            text = '我在太原'
+            service.record('99', [{'kind':'location','value':'太原','evidence':text}], text, NOW)
+            service.forget('42', '太原')
             self.assertIsNone([e for e in service.journal() if e['value']=='北京'][0]['previous'])
             for line in (Path(folder)/'conversation_journal.jsonl').read_text(encoding='utf-8').splitlines():
                 event = json.loads(line)
                 if event['user']=='42':
-                    self.assertNotIn('广州', str(event))
-            self.assertEqual(service.facts('99')[0]['value'], '广州')
+                    self.assertNotIn('太原', str(event))
+            self.assertEqual(service.facts('99')[0]['value'], '太原')
 
 
 class ImagePolicyTests(unittest.TestCase):

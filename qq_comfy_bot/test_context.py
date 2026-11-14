@@ -56,7 +56,7 @@ class WeatherTests(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import AsyncMock
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'weather.db';service=DailyWeather(path)
-            forecast=dict(date='2026-10-28',location='示例城区',source='MET Norway',summary='备用预报')
+            forecast=dict(date='2026-10-28',location='山西太原尖草坪',source='MET Norway',summary='备用预报')
             with patch.object(service,'fetch',AsyncMock(side_effect=[OSError('offline'),forecast])) as fetch:
                 result=await service.ensure(object(),NOW)
                 self.assertEqual(result['source'],'MET Norway')
@@ -72,6 +72,16 @@ class WeatherTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ScheduleTests(unittest.TestCase):
+    def setUp(self):
+        from unittest.mock import patch
+        config={'anchor_date':'2026-10-26','anchor_week':8,'note':'synthetic test fixture','courses':[
+            {'name':'大学英语A(3)','day':2,'weeks':'1-16','part':'afternoon','periods':'1-2','room':'A'},
+            {'name':'测试课程甲','day':2,'weeks':'1-16','part':'afternoon','periods':'3-4','room':'B'},
+            {'name':'测试课程乙','day':2,'weeks':'1-16','part':'evening','periods':'5-6','room':'C'},
+            {'name':'大学物理实验(1)','day':1,'weeks':'1-16','part':'evening','periods':'7-8','room':'大物实验室1'}]}
+        patched=patch.object(schedule,'load',return_value=config)
+        patched.start();self.addCleanup(patched.stop)
+
     def test_week_anchor_advances_on_monday(self):
         self.assertEqual(schedule.week_number(NOW.date()),8)
         self.assertEqual(schedule.week_number(datetime(2026,11,1).date()),8)
@@ -80,7 +90,7 @@ class ScheduleTests(unittest.TestCase):
     def test_week_eight_wednesday_and_alternating_monday(self):
         data=schedule.today(NOW)
         self.assertEqual(len(data['courses']),3)
-        self.assertIn('示例语言课',data['possible'])
+        self.assertIn('大学英语A(3)',data['possible'])
         self.assertTrue(data['uncertain'])
         self.assertFalse(schedule.in_weeks(6,'1-3,5,7,8-15'))
         self.assertTrue(schedule.in_weeks(8,'1-3,5,7,8-15'))
@@ -88,25 +98,25 @@ class ScheduleTests(unittest.TestCase):
     def test_tuesday_laboratory_changes(self):
         eight=schedule.today(datetime(2026,10,27,20,tzinfo=NOW.tzinfo))
         nine=schedule.today(datetime(2026,11,3,20,tzinfo=NOW.tzinfo))
-        self.assertIn('示例实验室1',[c['room'] for c in eight['courses']])
-        self.assertIn('示例实验室2',[c['room'] for c in nine['courses']])
+        self.assertIn('大物实验室1',[c['room'] for c in eight['courses']])
+        self.assertIn('大物实验室2',[c['room'] for c in nine['courses']])
 
 
 class MemoryTests(unittest.TestCase):
     def test_location_changes_record_history_and_keep_users_separate(self):
         with tempfile.TemporaryDirectory() as folder:
             life=Life(folder)
-            life.record('a',[dict(kind='location',value='广州',evidence='我在广州')],'我在广州',NOW)
+            life.record('a',[dict(kind='location',value='太原',evidence='我在太原')],'我在太原',NOW)
             life.record('a',[dict(kind='location',value='北京',evidence='我到了北京')],'我到了北京',NOW)
             self.assertEqual(life.facts('a')[0]['value'],'北京')
-            self.assertEqual(life.journal()[0]['previous'],'广州')
+            self.assertEqual(life.journal()[0]['previous'],'太原')
             self.assertEqual(life.facts('b'),[])
             self.assertEqual(len((Path(folder)/'conversation_journal.jsonl').read_text(encoding='utf-8').splitlines()),2)
 
     def test_wishes_and_hallucinated_location_are_not_facts(self):
         with tempfile.TemporaryDirectory() as folder:
             life=Life(folder)
-            for message,value in [('我想去北京','北京'),('假如我在北京','北京'),('我在广州','上海')]:
+            for message,value in [('我想去北京','北京'),('假如我在北京','北京'),('我在太原','上海')]:
                 self.assertEqual(life.record('a',[dict(kind='location',value=value,evidence=message)],message,NOW),[])
 
     def test_emotion_accumulates_and_decays_without_public_journal(self):
@@ -120,16 +130,16 @@ class MemoryTests(unittest.TestCase):
             self.assertNotIn('anger',life.profile('a'))
 
     def test_identifying_fields_are_redacted(self):
-        self.assertNotIn('19900000004',redact('电话 19900000004'))
-        self.assertNotIn('fixture1@example.invalid',redact('邮箱 fixture1@example.invalid'))
-        self.assertEqual(redact('学号：901000007'),'')
+        self.assertNotIn('13812345678',redact('电话 13812345678'))
+        self.assertNotIn('abc@example.com',redact('邮箱 abc@example.com'))
+        self.assertEqual(redact('学号：2501054136'),'')
 
 
 class ProfileTests(unittest.IsolatedAsyncioTestCase):
     async def test_note_extraction_cached_and_no_raw_content_returned(self):
         with tempfile.TemporaryDirectory() as folder:
             engine=ContextEngine(folder)
-            async def notes(*args):return {'pages':[{'text':'只想得到温和直接的回应。邮箱 fixture1@example.invalid'}]}
+            async def notes(*args):return {'pages':[{'text':'只想得到温和直接的回应。邮箱 abc@example.com'}]}
             class HTTP:
                 def __init__(self):self.count=0;self.request=None
                 def post(self,url,**kwargs):
@@ -142,7 +152,7 @@ class ProfileTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first,second);self.assertEqual(http.count,1)
             self.assertEqual(len(first),2)
             cache=(Path(folder)/'data'/'note_profile.json').read_text(encoding='utf-8')
-            self.assertNotIn('fixture1@example.invalid',str(http.request))
+            self.assertNotIn('abc@example.com',str(http.request))
             self.assertNotIn('只想得到',cache)
 
 

@@ -13,8 +13,10 @@ from zoneinfo import ZoneInfo
 
 from aiohttp import web
 import autostart
+import snowluma_service
 import preferences
 import image_mode
+import dashboard_logs
 import schedule
 from life import Life, redact
 from weather import DailyWeather
@@ -29,6 +31,7 @@ class Dashboard:
         self.token=token or secrets.token_urlsafe(32)
         self.state={'qq':'检查中','bot':'检查中','comfy':'待命'}
         self.stop=asyncio.Event()
+        self.qr_refresh_lock=asyncio.Lock()
         self.life=Life(self.root/'data')
         self.weather=DailyWeather(self.root/'data'/'weather.db')
 
@@ -41,6 +44,17 @@ class Dashboard:
             if previous!=value and '请扫码' in str(value):
                 try:tray.notify('QQ 登录已失效，请打开控制台扫码更新。','晚风 · 需要扫码')
                 except Exception:logging.warning('系统通知不可用，托盘仍显示扫码状态')
+
+    async def input_diagnostics(self, request):
+        import sqlite3
+        path=self.root/'data'/'inputs.db'
+        if not path.exists(): return web.json_response({'entries':[]})
+        db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)
+        try:
+            rows=db.execute('SELECT id,status,reason,updated FROM inputs ORDER BY updated DESC LIMIT 100').fetchall()
+            return web.json_response({'entries':[dict(zip(('input_id','status','reason','updated'),row)) for row in rows]})
+        finally:
+            db.close()
 
     def current(self):
         return datetime.now(ZoneInfo('Asia/Shanghai'))
@@ -65,9 +79,12 @@ class Dashboard:
         app.router.add_get('/',self.index)
         app.router.add_get('/app.js',self.javascript)
         app.router.add_get('/api/status',self.status)
+        app.router.add_get('/api/logs',self.logs)
+        app.router.add_get('/api/inputs',self.input_diagnostics)
         app.router.add_get('/api/preferences',self.get_preferences)
         app.router.add_post('/api/preferences',self.set_preferences)
         app.router.add_post('/api/autostart',self.set_autostart)
+        app.router.add_post('/api/snowluma/{setting:autostart|running}',self.set_snowluma)
         app.router.add_get('/api/journal',self.journal)
         app.router.add_get('/api/timetable',self.timetable)
         app.router.add_post('/api/week',self.set_week)
@@ -83,14 +100,24 @@ class Dashboard:
     async def javascript(self,request):
         return web.FileResponse(self.root/'web'/'app.js')
 
+    async def logs(self,request):
+        stream=request.query.get('stream','all')
+        if stream not in ('all','drawing','reply','login'):
+            raise web.HTTPBadRequest()
+        return web.json_response({'entries':await asyncio.to_thread(dashboard_logs.entries,self.root,stream)})
+
     async def status(self,request):
+        import services
+        qr=self.state.get('qr')
+        qr_version=services.napcat_qr_version(Path(qr)) if qr else ''
         now=self.current()
         weather=self.weather.read(now.date().isoformat())
         # Deliberately whitelist fields: no private emotional metrics or raw note bodies.
         return web.json_response(dict(qq=self.state.get('qq'),bot=self.state.get('bot'),comfy=self.state.get('comfy'),
             hour=now.strftime('%Y.%m.%d %H时'),weather=weather or {'status':'pending','summary':'今日天气尚未同步'},
             week=schedule.week_number(now.date()),course_count=len(schedule.today(now)['courses']),
-            autostart=autostart.enabled(),drawing_effective=image_mode.effective(preferences.load()),need_qr=bool(self.state.get('qr')) and not str(self.state.get('qq')).startswith('已在线')))
+            snowluma=await asyncio.to_thread(snowluma_service.status),
+            autostart=autostart.enabled(),drawing_effective=image_mode.effective(preferences.load()),qr_version=qr_version,need_qr=bool(qr_version) and not str(self.state.get('qq')).startswith('已在线')))
 
     async def get_preferences(self,request):
         return web.json_response(preferences.load())
@@ -107,6 +134,19 @@ class Dashboard:
         if type(data.get('enabled')) is not bool:
             raise web.HTTPBadRequest()
         autostart.set_enabled(data['enabled'])
+        return web.json_response({'ok':True})
+
+    async def set_snowluma(self,request):
+        data=await request.json()
+        if not isinstance(data,dict) or type(data.get('enabled')) is not bool:
+            raise web.HTTPBadRequest()
+        setter=(snowluma_service.set_autostart if request.match_info['setting']=='autostart'
+                else snowluma_service.set_running)
+        try:
+            await asyncio.to_thread(setter,data['enabled'])
+        except (OSError,RuntimeError) as exc:
+            logging.exception('SnowLuma control failed')
+            raise web.HTTPServiceUnavailable(text='无法更新 SnowLuma，请查看运行日志') from exc
         return web.json_response({'ok':True})
 
     async def journal(self,request):
@@ -139,33 +179,16 @@ class Dashboard:
         return web.FileResponse(path)
 
     async def refresh_qr(self,request):
-        import aiohttp, hashlib, services
-        config_path = Path(services.settings()['napcat_dir']) / 'config' / 'webui.json'
+        import aiohttp, services
         try:
-            config = json.loads(config_path.read_text(encoding='utf-8-sig'))
-            if config.get('enable2FA'):
-                raise ValueError('NapCat 开启了双重验证，请在 NapCat 管理页面刷新二维码。')
-            token = config['token']
-            digest = hashlib.sha256((token + '.napcat').encode()).hexdigest()
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                async with session.post('http://127.0.0.1:6099/api/auth/login',json={'hash':digest}) as response:
-                    auth = await response.json()
-                credential = auth.get('data',{}).get('Credential')
-                if not credential:
-                    raise ValueError('NapCat 管理服务认证失败')
-                async with session.post('http://127.0.0.1:6099/api/QQLogin/RefreshQRcode',json={},headers={'Authorization':'Bearer '+credential}) as response:
-                    result = await response.json()
-                if result.get('code') != 0 or not (result.get('data') or {}).get('qrcodeurl'):
-                    raise ValueError('二维码暂时无法刷新，可能已经登录或正在重连')
-            qr = Path(services.settings()['napcat_dir']) / 'cache' / 'qrcode.png'
-            if not qr.is_file():
-                raise ValueError('二维码尚未生成，请稍后重试')
-            self.emit('qr',str(qr))
+            async with self.qr_refresh_lock:
+                async with aiohttp.ClientSession(trust_env=False) as session:
+                    qr=await services.refresh_napcat_qr(session,services.settings())
+                self.emit('qr',str(qr))
             return web.json_response({'ok':True})
         except (OSError, KeyError, ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logging.warning('刷新二维码失败: %s',type(exc).__name__)
-            return web.json_response({'error':'刷新失败，请稍后重试或检查 NapCat 是否正在运行。'},status=503)
+            return web.json_response({'error':'未收到新的二维码，请检查 NapCat 登录状态。'},status=503)
 
     async def quit(self,request):
         asyncio.get_running_loop().call_later(0.5,self.stop.set)

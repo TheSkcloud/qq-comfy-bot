@@ -6,7 +6,10 @@ PATH = Path(__file__).with_name('timetable.json')
 
 
 def load():
-    return json.loads(PATH.read_text(encoding='utf-8'))
+    try:
+        return json.loads(PATH.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {'anchor_date': date.today().isoformat(), 'anchor_week': 1, 'courses': [], 'note': ''}
 
 
 def in_weeks(week, expression):
@@ -33,8 +36,8 @@ def today(current):
     week = week_number(current.date(), config)
     courses = [dict(c) for c in config['courses'] if c['day']==current.weekday() and in_weeks(week,c['weeks'])]
     for course in courses:
-        if course['name']=='示例实验课' and week >= 9:
-            course['room'] = f'示例实验室{week-7}'
+        if course['name']=='大学物理实验(1)' and week >= 9:
+            course['room'] = f'大物实验室{week-7}'
     part = 'morning' if 8<=current.hour<13 else 'afternoon' if 14<=current.hour<19 else 'evening' if 19<=current.hour<23 else None
     possible = [c['name'] for c in courses if c['part']==part]
     return dict(week=week, courses=courses, possible=possible, uncertain=True, note=config['note'])

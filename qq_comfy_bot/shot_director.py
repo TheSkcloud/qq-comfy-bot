@@ -62,7 +62,7 @@ def _expectations(plan):
     distant=plan['size'] in ('wide','extreme_wide')
     face=not partial and not distant and plan['direction'] not in ('back','over_shoulder')
     return dict(face_expected=face, eyes_expected=face, full_body_expected=plan['size']=='full',
-                subject='hands and activity props' if partial else 'character within environment' if distant else 'character performing planned action',
+                subject=plan.get('detail_subject','hands and activity props') if partial else 'character within environment' if distant else 'character performing planned action',
                 identity_scope='visible features only; absence of off-frame face/eyes is expected' if not face else 'visible hair, eyes and face',
                 required_checks=['visible identity conflicts','visible outfit','planned subject/action','setting/time','visible anatomy'])
 
@@ -80,6 +80,15 @@ def choose(snapshot, request='', history=()):
     suitable=[s for s in SHOTS if style in s['styles'] and (not s['activities'] or any(w in activity for w in s['activities']))]
     if snapshot.get('purpose')=='poster' and 'size' not in locked:
         suitable=[s for s in suitable if s['size'] in ('full','medium','close')]
+    # Hard action visibility constraints precede diversity scoring. User camera locks win.
+    if 'size' not in locked and not avatar and not fixed:
+        action=snapshot.get('action','')+' '+creative.get('focal_point','')
+        if re.search(r'\b(?:leg|legs|foot|feet|knee|kneeling|hemline|slipper|socks)\b',action,re.I):
+            compatible=[s for s in suitable if s['size'] in ('full','wide','extreme_wide')]
+            if compatible:suitable=compatible
+        elif re.search(r'\b(?:throat|ribs|hip|waist)\b',action,re.I):
+            compatible=[s for s in suitable if s['size'] in ('medium','full','wide')]
+            if compatible:suitable=compatible
     recent=list(history)[-12:]
     recent_hand_failure=any(item.get('plan',{}).get('size')=='detail' and item.get('anatomy_ok') is False
         and 0<=time.time()-item.get('at',0)<86400
@@ -126,6 +135,10 @@ def choose(snapshot, request='', history=()):
     if (fixed and not locked) or avatar:
         selected.update(classify(snapshot.get('camera','')))
         selected['tags']=snapshot['camera']
+    if selected['size']=='detail':
+        hand=re.search(r'(?:只|仅)(?:画|拍|露出|看到|用)?(?:一只)?([左右单])手|(?:只|仅)(?:画|拍|露出|看到|用)?(一只手)',request)
+        if hand:
+            selected['detail_subject']={'左':'one left hand','右':'one right hand','单':'one hand'}.get(hand[1],'one hand')
     selected['expectations']=_expectations(selected)
     selected['action']=snapshot.get('action','')
     selected['foreground']='activity props' if selected['composition']=='foreground' else ''
@@ -167,7 +180,7 @@ def guide_prompt(snapshot, prompt):
                'extreme_close':'(extreme close-up:1.3)',
                'detail':'(hands focus:1.4), (close-up of hands:1.35), only hands and activity props in frame, tabletop fills the image, face out of frame'}
     direction={'back':'(from behind:1.4), back view, looking away',
-               'over_shoulder':'(over the shoulder:1.35), from behind, looking at the book',
+               'over_shoulder':'(over the shoulder:1.35), from behind',
                'side':'(from side:1.3), side profile',
                'three_quarter':'three quarter view','front':'front view'}
     facing='top down view of the activity surface' if plan['size']=='detail' else direction[plan['direction']]
@@ -179,6 +192,7 @@ def negative_tags(plan):
     if plan.get('size') in ('wide','extreme_wide'):tags+=['close-up','portrait','upper body','large foreground character']
     if plan.get('direction') in ('back','over_shoulder'):tags+=['front view','looking at viewer','eye contact']
     if plan.get('size')=='detail':tags+=['portrait','face','head','full body','upper body']
+    if plan.get('detail_subject'):tags+=['both hands']
     return ', '.join(tags)
 
 

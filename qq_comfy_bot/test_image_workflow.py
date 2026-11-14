@@ -28,7 +28,9 @@ class WorkflowTests(unittest.TestCase):
 
     def test_mode_prompts_separate_doodle_manga_and_reference_scene(self):
         ref=w.prompt(self.snapshot,{'reference':True},'old artist prompt')
-        self.assertEqual(ref,'old artist prompt')
+        self.assertNotIn('old artist prompt',ref)
+        self.assertIn('golden eyes',ref)
+        self.assertIn('single continuous illustration',ref)
         comfort=w.prompt({**self.snapshot,'style':'comfort'},{'reference':False},'legacy')
         comic=w.prompt({**self.snapshot,'style':'comic'},{'reference':False},'legacy')
         self.assertIn('colored pencil',comfort);self.assertIn('manga',comic)

@@ -28,6 +28,7 @@ class Life:
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS facts (user TEXT, kind TEXT, value TEXT, updated TEXT, PRIMARY KEY(user,kind))')
             db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY,user TEXT,at TEXT,kind TEXT,value TEXT,previous TEXT,evidence TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS committed_affect (event_id TEXT PRIMARY KEY, user TEXT, at TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS feelings (user TEXT PRIMARY KEY,data TEXT,updated TEXT)')
         (self.root/'conversation_journal.jsonl').touch(exist_ok=True)
 
@@ -44,6 +45,7 @@ class Life:
         stamp=current.isoformat(timespec='hours')
         accepted=[]
         diagnostics=diagnostics if diagnostics is not None else {}
+        updates = updates if isinstance(updates, list) else []
         diagnostics.update(proposed=len(updates),accepted=0,rejected=0,reasons={})
         def reject(reason):
             diagnostics['rejected']+=1
@@ -63,8 +65,8 @@ class Life:
             if kind=='location' and (not re.search(r'我(?:现在)?(?:在|到|回|住|搬)|到了|搬到',evidence) or re.search(r'不在|没到|想去|打算|如果|假如|角色|你在',evidence)):
                 reject('unconfirmed_location')
                 continue
-            if kind=='location' and value not in evidence:
-                reject('location_not_in_evidence')
+            if value not in evidence:
+                reject('MEMORY_EVIDENCE_FAILED')
                 continue
             value=redact(value)
             if not value:
@@ -176,7 +178,7 @@ class Life:
             archive.write(json.dumps(dict(user=user,at=stamp,kind=kind,value=new,previous=old,evidence=evidence),ensure_ascii=False)+'\n')
         return True
 
-    def mood(self,user,deltas,current):
+    def mood(self,user,deltas,current,event_id=None):
         with self.db() as db:
             row=db.execute('SELECT data,updated FROM feelings WHERE user=?',(user,)).fetchone()
         values=BASE.copy();mode='neutral'
@@ -197,8 +199,13 @@ class Life:
         elif mode not in axes or values[axes[mode]]<4:
             mode='neutral'
         stored={**values,'_mode':mode}
-        with self.db() as db:
-            db.execute('INSERT OR REPLACE INTO feelings VALUES (?,?,?)',(user,json.dumps(stored),current.isoformat()))
+        if deltas:
+            with self.db() as db:
+                if event_id:
+                    inserted=db.execute('INSERT OR IGNORE INTO committed_affect VALUES (?,?,?)',(str(user)+':'+event_id,user,current.isoformat())).rowcount
+                    if not inserted:
+                        return self.mood(user,{},current)
+                db.execute('INSERT OR REPLACE INTO feelings VALUES (?,?,?)',(user,json.dumps(stored),current.isoformat()))
         styles={'neutral':'自然平稳，跟随用户话题。','angry':'语气稍直接但仍尊重用户，不挖苦、威胁、冷暴力或拒绝合理帮助。',
                 'sad':'语气稍低缓，不要求用户负责或安慰你。','joyful':'语气更轻快，但不夸张刷屏。','tense':'句子稍简短，仍耐心完成交流。'}
         # Short-term affect must not override the persistent relationship stage.
