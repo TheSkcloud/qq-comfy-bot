@@ -79,7 +79,7 @@ class ContextEngine:
                 cache.write_text(json.dumps({'date':day,'traits':[],'status':'unavailable','error':type(exc).__name__}),encoding='utf-8')
                 return []
 
-    async def build(self,http,user,message,current,private=True,character='',visual_requested=False):
+    async def build(self,http,user,message,current,private=True,character='',visual_requested=False,cached_only=False):
         if http is None or os.getenv('CONTEXT_ENABLED','1')=='0':
             return ''
         pieces=[]
@@ -89,8 +89,11 @@ class ContextEngine:
         weather_relevant=visual_requested or image_requested(message) or any(word in message for word in ('天气','冷','热','下雨','下雪','出门','穿什么','散步','你在','你今天'))
         weather={'summary':'本轮未查询天气，不推断实际天气。'}
         if activity_relevant or weather_relevant:
-            weather=await self.weather.ensure(http,current)
-        if activity_relevant:
+            if visual_requested or cached_only:
+                weather=self.weather.read(current.date().isoformat()) or weather
+            else:
+                weather=await self.weather.ensure(http,current)
+        if activity_relevant and not (visual_requested or cached_only):
             await self.routine.ensure(http,routine_user,current,weather,character)
         # A schedule exists throughout the day, but it is only recalled when relevant.
         # Inserting the full activity into every turn made the model report it constantly.
@@ -98,13 +101,15 @@ class ContextEngine:
             pieces.append(self.routine.current(routine_user,current,weather,character))
         pieces.append(character_context(character,message))
         if weather_relevant:
-            pieces.append(weather['summary']+' 当日预报非实时观测，仅适用本地；用户已离开时不套用到新地点，只在相关时考虑。')
-        if is_owner(user) and any(k in message for k in ('课','学校','安排','日程','考试','上学','作业')):
+            pieces.append(weather['summary']+' 当日预报非实时观测，仅适用尖草坪；用户已离开时不套用到新地点，只在相关时考虑。')
+        if private and is_owner(user) and schedule.PATH.is_file() and any(k in message for k in ('课','学校','安排','日程','考试','上学','作业')):
             pieces.append(schedule.context(current))
         if private:
             profile=self.life.recall(user,message,current)
             if profile:
-                pieces.append('用户明确说过的事实（虚拟场景不等于用户位置）：'+profile)
+                memory='用户明确说过的事实（虚拟场景不等于用户位置）：'+profile
+                if cached_only:pieces.insert(0,memory)
+                else:pieces.append(memory)
             pieces.append('本轮语气：'+self.life.mood(user,{},current))
             import preferences
             pieces.append(self.companion.context(user,character,current,preferences.load().get('romance_mode','slow')))
@@ -114,7 +119,7 @@ class ContextEngine:
                     cached=json.loads((self.root/'data'/'note_profile.json').read_text(encoding='utf-8'))
                     traits=cached.get('traits',[]) if cached.get('date')==current.date().isoformat() else []
                 except (OSError,ValueError):traits=[]
-                if not traits and any(word in message for word in ('性格','偏好','相处','习惯','了解我')):
+                if not traits and not (visual_requested or cached_only) and any(word in message for word in ('性格','偏好','相处','习惯','了解我')):
                     traits=await self.personality(http,current)
                 if traits:
                     pieces.append('交流偏好参考：'+'；'.join(traits)+'。只用于调整表达，不主动向用户念画像，不做诊断；被问信息来源时如实说明笔记背景。')

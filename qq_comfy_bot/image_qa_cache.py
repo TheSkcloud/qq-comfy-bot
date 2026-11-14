@@ -9,12 +9,13 @@ import weakref
 from datetime import datetime
 import io
 
-RUBRIC='visual-qa-v3-findings'
+RUBRIC='visual-qa-v4-prompt-scope'
 _loops=weakref.WeakKeyDictionary()
 
 def key(content,snapshot):
     fields=('character_id','identity','location','outfit','hairstyle','outfit_tags','setting_tags','action','props','emotion','style','expected_art_style','purpose')
     target={field:snapshot.get(field) for field in fields}
+    target['render_target']=snapshot.get('render_target')
     target['state']=snapshot.get('state',{})
     shot=snapshot.get('shot_plan') or {}
     target['shot']={field:shot.get(field) for field in ('size','direction','elevation','composition','expectations','user_locked')}

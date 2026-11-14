@@ -6,6 +6,26 @@ import re
 VISUAL_TOPIC = r'跳舞|舞步|舞蹈|练功服|海报|照片|图片|插画|自拍|头像|穿搭|衣裙|服装|发型|造型|样貌|模样|弹琴|做饭|散步|读书|看书|画画|(?:学习|写字|做笔记)(?:的时候|时候|时)?的?(?:样子|模样)'
 NON_VISUAL_TARGET = r'怎么看|看法|观点|想法|思路|原理|算法|源码|报错|日志|函数|公式|解题|代码|实现|文档|后续发展|接下来会|结果如何'
 
+EXCLUDED_OBJECTS = {'帽子':'hat','手机':'phone','眼镜':'glasses','雨伞':'umbrella',
+                    '耳机':'headphones','口罩':'mask','背包':'backpack','围巾':'scarf'}
+OBJECT_EXCLUSION = re.compile(r'(?:别|不要|不用|不需要)(?:画|戴|拿|加上?|放|穿|带|出现)?(?:着|上)?\s*('
+                              +'|'.join(EXCLUDED_OBJECTS)+r')')
+IMAGE_REFUSAL = re.compile(r'(?:不要|别|不用|不想|不需要|先不|不聊|不说)[^，,。！？?!；;\n]{0,8}'
+                           r'(?:图(?!书)|照片|拍(?:照|张照|了|摄|$)|画(?!饼)|海报|自拍|生成(?:了|$)|'
+                           r'看你[^，,。！？?!；;\n]{0,8}(?:跳舞|的样子))|'
+                           r'不看(?:这张|那张)?(?:照片|图片|图|海报)|'
+                           r'(?:图|照片|海报)[^，,。！？?!；;\n]{0,3}(?:别|不要|不用|先不)(?:再|继续)?(?:发|看)')
+
+
+def cancels_image(text):
+    text=OBJECT_EXCLUSION.sub('',text)
+    return (text.strip() in ('/取消','取消') or bool(IMAGE_REFUSAL.search(text))
+            or bool(re.search(r'(?:取消|停止)[^，,。！？?!；;\n]{0,6}(?:画|图|拍|生成)',text)))
+
+
+def excluded_objects(text):
+    return [EXCLUDED_OBJECTS[match[1]] for match in OBJECT_EXCLUSION.finditer(text)]
+
 
 def visual_reference(history):
     """Resolve a short 'may I see?' only within the recent, still relevant visual topic."""
@@ -38,11 +58,11 @@ def visual_request_context(text,history=None):
 
 
 def image_requested(text, history=None):
+    if cancels_image(text):
+        return False
+    text=OBJECT_EXCLUSION.sub('',text).strip()
     if text.startswith('/拍照'):
         return True
-    if re.search(r'(?:不要|别|不用|不想|不需要|先不|别再|不聊|不说|不看).{0,8}(?:图|照片|拍照|拍张照|画|给我看|看你|看|海报)', text):
-        return False
-    if re.search(r'(?:不要|别|不用|不想|不需要|先不).{0,8}自拍',text):return False
     if not re.search(r'我(?:正在|在)画画|(?:源码|代码|函数|算法)',text) and re.search(
             r'(?:发|来|给我|拍|画).{0,10}(?:自拍|近照|肖像|插画)|(?:发|来|给我).{0,6}(?:一|两|二|三)?(?:张|幅)(?:图|画|照片)',text):return True
     strong=bool(re.search(r'画(?:一|两|二|三|个|张|幅|点)|发.{0,3}(?:图|照片)|拍.{0,3}(?:照|相)',text))

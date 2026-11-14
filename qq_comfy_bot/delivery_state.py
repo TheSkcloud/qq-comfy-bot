@@ -27,6 +27,14 @@ def stage(session,data,plan,input_id,version,current):
 def acknowledge(session,data,text,source,ack,current,complete=False):
     pending=session.get('pending_turn',{})
     if not pending:return
+    receipt_id=(ack or {}).get('message_id')
+    if receipt_id is None:
+        pending['status']='outcome_unknown'
+        event(session,'QQ_ACK_UNKNOWN',current,input_id=pending.get('id'))
+        return
+    receipt_key=str(receipt_id)
+    if receipt_key in pending.get('committed_receipts',[]):return
+    pending.setdefault('committed_receipts',[]).append(receipt_key)
     pending['acknowledged_text'].append(text)
     delivered='\n'.join(pending['acknowledged_text'])
     changed=False

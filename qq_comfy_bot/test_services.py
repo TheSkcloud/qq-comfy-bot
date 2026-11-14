@@ -67,16 +67,16 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
             await manager_instance.run()
             spawn.assert_not_called()
 
-    async def test_exited_napcat_can_be_started_again(self):
+    async def test_exited_napcat_is_never_restarted(self):
         supervisor = manager.Supervisor(lambda *args: None)
         supervisor.napcat_started = True  # State left by the previous implementation.
         supervisor.napcat_process = Mock(poll=lambda: 1)
         supervisor.emit = lambda key, value: supervisor.stop.set() if key == 'bot' else None
         with patch.object(services, 'bot_running', return_value=True), patch.object(services, 'qq_status', AsyncMock(return_value='unavailable')), patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), patch.object(services, 'napcat_running', return_value=False), patch.object(services, 'napcat_command', return_value=(['launcher'], {})), patch.object(services, 'spawn') as spawn:
             await supervisor.run()
-            spawn.assert_called_once()
+            spawn.assert_not_called()
 
-    async def test_invalid_ticket_is_not_retried_every_poll(self):
+    async def test_legacy_login_ticket_is_not_used(self):
         supervisor = manager.Supervisor(lambda *args: None)
         cycles = []
         def emit(key, value):
@@ -91,7 +91,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(services, 'bot_running', return_value=True), patch.object(services, 'qq_status', AsyncMock(return_value='unavailable')), patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), patch.object(services, 'napcat_running', return_value=True), patch.object(services, 'recover_qq_login', AsyncMock(return_value='needs_qr')) as recover, patch.object(manager.asyncio, 'sleep', no_sleep):
             await supervisor.run()
             self.assertEqual(len(cycles), 2)
-            recover.assert_awaited_once()
+            recover.assert_not_awaited()
 
 
 class LoginRecoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -156,6 +156,20 @@ class LoginRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.responses['QQLogin/CheckLoginStatus']['data'] = state
             self.assertEqual(await services.recover_qq_login(self.http, self.config), 'pending')
         self.assertNotIn('QQLogin/SetQuickLogin', [name for name, body in self.calls])
+        self.assertNotIn('QQLogin/SetQuickLoginQQ', [name for name, body in self.calls])
+
+    async def test_qr_refresh_accepts_only_new_file_on_configured_port(self):
+        qr = self.root / 'cache' / 'qrcode.png'
+        qr.parent.mkdir()
+        qr.write_bytes(b'old')
+        self.responses['QQLogin/RefreshQRcode'] = {'code': 0}
+        async def write_after_ack(_):
+            qr.write_bytes(b'new-qr')
+        with patch.object(services.asyncio, 'sleep', write_after_ack):
+            self.assertEqual(await services.refresh_napcat_qr(self.http, self.config), qr)
+        with patch.object(services.asyncio, 'sleep', AsyncMock()):
+            with self.assertRaisesRegex(ValueError, 'fresh QR'):
+                await services.refresh_napcat_qr(self.http, self.config)
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -186,12 +200,12 @@ class ConfigurationTests(unittest.TestCase):
             app = qq.parent / 'versions' / '9.9.99-55555' / 'resources' / 'app'
             app.mkdir(parents=True)
             (app / 'package.json').write_text(json.dumps({'version': '9.9.99', 'main': 'original.js'}))
-            cmd, env = services.napcat_command(dict(napcat_dir=str(napcat), qq_exe=str(qq), bot_qq='901000008'))
-            self.assertEqual(cmd[-2:], ['-q', '901000008'])
+            cmd, env = services.napcat_command(dict(napcat_dir=str(napcat), qq_exe=str(qq), bot_qq='901000009'))
+            self.assertEqual(cmd[-2:], ['-q', '901000009'])
             package = json.loads((napcat / 'qqnt.json').read_text())
             self.assertEqual((app / package['main']).resolve(), napcat / 'loadNapCat.cjs')
             self.assertEqual(env['NAPCAT_MAIN_PATH'], str(napcat / 'napcat.mjs'))
-            self.assertEqual(env['NAPCAT_QUICK_ACCOUNT'], '901000008')
+            self.assertEqual(env['NAPCAT_QUICK_ACCOUNT'], '901000009')
 
     def test_bot_file_lock_prevents_duplicate(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(services, 'ROOT', Path(folder)):
