@@ -104,6 +104,20 @@ class MemoryEvidenceSafetyTests(unittest.TestCase):
             self.assertEqual(life.facts('42'), [])
             self.assertEqual(diagnostics['reasons']['value_not_in_evidence'], 1)
 
+    def test_mood_context_read_does_not_modify_persistent_state(self):
+        from datetime import timedelta
+        with tempfile.TemporaryDirectory() as folder:
+            life = Life(folder)
+            life.mood('42', {}, NOW)
+            with life.db() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM feelings').fetchone()[0], 0)
+            life.mood('42', {'joy': 2}, NOW)
+            with life.db() as db:
+                stored = db.execute('SELECT updated FROM feelings WHERE user=?', ('42',)).fetchone()[0]
+            life.mood('42', {}, NOW + timedelta(hours=3))
+            with life.db() as db:
+                self.assertEqual(db.execute('SELECT updated FROM feelings WHERE user=?', ('42',)).fetchone()[0], stored)
+
     def test_source_verbatim_value_remains_eligible(self):
         with tempfile.TemporaryDirectory() as folder:
             life = Life(folder)
