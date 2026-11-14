@@ -29,7 +29,7 @@ class SnowLumaConfigurationTests(unittest.TestCase):
                 json.dumps({'qq_provider': 'napcat', 'bot_qq': '500002', 'python':'python'}),
                 encoding='utf-8')
             # Regression guard: the new configurator cannot touch old transport configs.
-            legacy = root.parent / 'do-not-touch-onebot.json'
+            legacy = root / 'do-not-touch-onebot.json'
             try:
                 legacy.write_text('{"sentinel":true}', encoding='utf-8')
                 with patch.object(configure, 'ROOT', root):
