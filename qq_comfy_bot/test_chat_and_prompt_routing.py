@@ -189,6 +189,24 @@ class StabilityRoutingTests(unittest.TestCase):
             self.assertTrue(chat_analysis.should_split(
                 '你怎么看？', [], {'stage':'C', 'substantive': True}, state))
 
+    def test_automatic_activity_cannot_bypass_priority_by_saying_photo(self):
+        from datetime import timedelta
+        session = {'state': dict(bot.DEFAULT), 'history': []}
+        current = bot.now()
+        candidate = {
+            'source_type': 'life',
+            'character_activity': '拍照',
+            'scene_description': dict(bot.DEFAULT),
+            'expires_at': (current + timedelta(minutes=10)).isoformat(),
+            'dedupe_key': '0' * 64,
+            'candidate_id': 'test',
+        }
+        decision = bot.image_director.decide(
+            session, '拍照', {'_candidate': candidate}, current, {}, enabled=False)
+        self.assertFalse(decision['allowed'])
+        self.assertEqual(decision['kind'], 'life')
+        self.assertNotEqual(decision['reason'], 'explicit_user_request')
+
     def test_split_can_be_explicitly_disabled(self):
         with patch.dict(os.environ, {'CHAT_SPLIT_MIN_CHARS': '0'}):
             self.assertFalse(chat_analysis.should_split('你是不是讨厌我？',
