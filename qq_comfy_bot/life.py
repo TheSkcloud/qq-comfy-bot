@@ -60,6 +60,11 @@ class Life:
             if kind not in KINDS or not evidence or evidence not in message or not value:
                 reject('invalid_kind_value_or_evidence')
                 continue
+            # The citation must support the *value*, not merely exist somewhere in
+            # the user message. Keep paraphrases out of the permanent store.
+            if value not in evidence:
+                reject('value_not_in_evidence')
+                continue
             if kind=='location' and (not re.search(r'我(?:现在)?(?:在|到|回|住|搬)|到了|搬到',evidence) or re.search(r'不在|没到|想去|打算|如果|假如|角色|你在',evidence)):
                 reject('unconfirmed_location')
                 continue
@@ -197,8 +202,14 @@ class Life:
         elif mode not in axes or values[axes[mode]]<4:
             mode='neutral'
         stored={**values,'_mode':mode}
-        with self.db() as db:
-            db.execute('INSERT OR REPLACE INTO feelings VALUES (?,?,?)',(user,json.dumps(stored),current.isoformat()))
+        # Reading the mood for prompt construction must not refresh the stored
+        # timestamp, because that would change how subsequent decay is computed.
+        has_change=any(isinstance(deltas.get(k),(int,float)) and not isinstance(deltas.get(k),bool)
+                       and math.isfinite(deltas[k]) and deltas[k]!=0 for k in DIMENSIONS)
+        if has_change:
+            with self.db() as db:
+                db.execute('INSERT OR REPLACE INTO feelings VALUES (?,?,?)',
+                           (user,json.dumps(stored),current.isoformat()))
         styles={'neutral':'自然平稳，跟随用户话题。','angry':'语气稍直接但仍尊重用户，不挖苦、威胁、冷暴力或拒绝合理帮助。',
                 'sad':'语气稍低缓，不要求用户负责或安慰你。','joyful':'语气更轻快，但不夸张刷屏。','tense':'句子稍简短，仍耐心完成交流。'}
         # Short-term affect must not override the persistent relationship stage.

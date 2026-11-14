@@ -145,7 +145,8 @@ def napcat_command(config):
 async def qq_status(http, url, token, expected_account=None):
     """Read-only OneBot probe: does not send QQ messages."""
     try:
-        async with http.ws_connect(url, headers={'Authorization': 'Bearer ' + token}) as ws:
+        headers = {'Authorization': 'Bearer ' + token} if token else {}
+        async with http.ws_connect(url, headers=headers) as ws:
             for action in ('get_status', 'get_login_info'):
                 await ws.send_json(dict(action=action, params={}, echo=action))
             result = {}
