@@ -115,10 +115,15 @@ def scene_context(session,include_plan=True):
 
 def decide(session, text, data, current, settings, enabled=True):
     cfg=config(settings)
-    explicit=image_requested(text,session.get('history',[])) or data.get('_explicit_image_request') is True
     proposal=data.get('image_plan',{})
     proposal=proposal if isinstance(proposal,dict) else {}
     candidate=data.get('_candidate',{})
+    candidate=candidate if isinstance(candidate,dict) else {}
+    # Candidate text is a character activity, NOT a user instruction. A routine
+    # containing words like "拍照" must never be upgraded to an explicit user
+    # request, which would bypass daily budgets and quiet-hour checks.
+    explicit=not bool(candidate) and (
+        image_requested(text,session.get('history',[])) or data.get('_explicit_image_request') is True)
     kind='explicit' if explicit else candidate.get('source_type',proposal.get('kind','life'))
     if not isinstance(kind,str):kind='life'
     style=('comic' if re.search(r'搞怪|漫画|整活|搞笑',text) else
