@@ -60,6 +60,12 @@ class Life:
             if kind not in KINDS or not evidence or evidence not in message or not value:
                 reject('invalid_kind_value_or_evidence')
                 continue
+            # An evidence quote alone does not make an invented model summary true.
+            # Store only source-verbatim values for normal extraction; explicit
+            # user corrections still go through correct(), which validates ownership.
+            if value not in evidence:
+                reject('value_not_in_evidence')
+                continue
             if kind=='location' and (not re.search(r'我(?:现在)?(?:在|到|回|住|搬)|到了|搬到',evidence) or re.search(r'不在|没到|想去|打算|如果|假如|角色|你在',evidence)):
                 reject('unconfirmed_location')
                 continue
