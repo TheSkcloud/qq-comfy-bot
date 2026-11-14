@@ -1,0 +1,31 @@
+name: SnowLuma stability checks
+on:
+  pull_request:
+    paths:
+      - 'qq_comfy_bot/**'
+      - '.github/workflows/snowluma-stability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-python:
+    name: Windows Python 3.12 / mocked integration tests
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'qq_comfy_bot/requirements.txt'
+      - name: Install runtime dependencies
+        run: python -m pip install -r qq_comfy_bot/requirements.txt
+      - name: Syntax check
+        run: python -m compileall -q qq_comfy_bot
+      - name: SnowLuma isolation tests
+        run: python -m unittest discover -s qq_comfy_bot -p "test_snowluma_stability.py" -v
+      - name: Full mocked regression suite
+        run: python -m unittest discover -s qq_comfy_bot -p "test_*.py" -v
