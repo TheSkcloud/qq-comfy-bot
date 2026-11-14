@@ -203,8 +203,19 @@ class Life:
         elif mode not in axes or values[axes[mode]]<4:
             mode='neutral'
         stored={**values,'_mode':mode}
-        with self.db() as db:
-            db.execute('INSERT OR REPLACE INTO feelings VALUES (?,?,?)',(user,json.dumps(stored),current.isoformat()))
+        # Context building calls mood() with empty deltas only to read the style.
+        # Reads must not rewrite the stored mood timestamp or create a new row.
+        has_change=any(
+            isinstance(deltas.get(key), (int, float))
+            and not isinstance(deltas.get(key), bool)
+            and math.isfinite(deltas[key])
+            and deltas[key] != 0
+            for key in DIMENSIONS
+        )
+        if has_change:
+            with self.db() as db:
+                db.execute('INSERT OR REPLACE INTO feelings VALUES (?,?,?)',
+                           (user,json.dumps(stored),current.isoformat()))
         styles={'neutral':'自然平稳，跟随用户话题。','angry':'语气稍直接但仍尊重用户，不挖苦、威胁、冷暴力或拒绝合理帮助。',
                 'sad':'语气稍低缓，不要求用户负责或安慰你。','joyful':'语气更轻快，但不夸张刷屏。','tense':'句子稍简短，仍耐心完成交流。'}
         # Short-term affect must not override the persistent relationship stage.
