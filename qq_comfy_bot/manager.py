@@ -27,10 +27,10 @@ class Supervisor:
         self.config = services.settings()
         self.stop = threading.Event()
         self.bot_process = None
-                        self.next_bot_attempt = 0
-                self.last_online = 0
-                        self.last_qq_state = None
-                login_checkpoint.record(ROOT,self.config,'supervisor_start','starting')
+        self.next_bot_attempt = 0
+        self.last_online = 0
+        self.last_qq_state = None
+        login_checkpoint.record(ROOT, self.config, 'supervisor_start', 'starting')
 
     def start_bot(self):
         self.bot_process = services.spawn([self.config['python'], str(ROOT / 'bot.py')],
