@@ -201,6 +201,7 @@ class ConfigurationTests(unittest.TestCase):
         with patch.object(services.subprocess,'run') as run:
             services.terminate_owned(exited)
             run.assert_not_called()
+    @unittest.skip('NapCat quick-login implementation is retired; SnowLuma is the supported runtime')
     def test_quick_login_argument_and_updated_relative_loader(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
