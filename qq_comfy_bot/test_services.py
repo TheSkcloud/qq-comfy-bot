@@ -15,7 +15,7 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         services._comfy_lock = asyncio.Lock()
         services._comfy_process = None
         # A source checkout has no private launcher.json or saved QQ login state.
-        self.settings_patch=patch.object(services,'settings',return_value={'bot_qq':'test-account','napcat_dir':'.','python':'python'})
+        self.settings_patch=patch.object(services,'settings',return_value={'qq_provider':'snowluma','bot_qq':'test-account','python':'python'})
         self.settings_patch.start();self.addCleanup(self.settings_patch.stop)
         self.checkpoint_patch=patch.object(manager.login_checkpoint,'record')
         self.checkpoint_patch.start();self.addCleanup(self.checkpoint_patch.stop)
@@ -48,35 +48,47 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                 await services.ensure_comfy(None, 'http://example.com:8188')
             spawn.assert_not_called()
 
-    async def test_waiting_napcat_is_not_launched_twice(self):
+    async def test_missing_snowluma_connection_does_not_launch_legacy(self):
         supervisor = manager.Supervisor(lambda *args: None)
-        def emit(key, value):
-            if key == 'bot': supervisor.stop.set()
-        supervisor.emit = emit
-        with patch.object(services, 'bot_running', return_value=True), patch.object(services, 'qq_status', AsyncMock(return_value='unavailable')), patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), patch.object(services, 'napcat_running', return_value=True), patch.object(services, 'recover_qq_login', AsyncMock(return_value='pending')), patch.object(services, 'spawn') as spawn:
+        supervisor.emit = lambda key, value: supervisor.stop.set() if key == 'bot' else None
+        with patch.object(services, 'bot_running', return_value=True), \
+                patch.object(services, 'qq_status', AsyncMock(return_value='unavailable')), \
+                patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), \
+                patch.object(services, 'napcat_command') as legacy, \
+                patch.object(services, 'spawn') as spawn:
             await supervisor.run()
             spawn.assert_not_called()
+            legacy.assert_not_called()
 
     async def test_manager_reuses_online_bot_and_qq(self):
-        manager_instance = manager.Supervisor(lambda *args: None)
-        def emit(key, value):
-            if key == 'bot':
-                manager_instance.stop.set()
-        manager_instance.emit = emit
-        with patch.object(services, 'bot_running', return_value=True), patch.object(services, 'qq_status', AsyncMock(return_value='online')), patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), patch.object(services, 'spawn') as spawn:
-            await manager_instance.run()
-            spawn.assert_not_called()
-
-    async def test_exited_napcat_can_be_started_again(self):
         supervisor = manager.Supervisor(lambda *args: None)
-        supervisor.napcat_started = True  # State left by the previous implementation.
-        supervisor.napcat_process = Mock(poll=lambda: 1)
-        supervisor.emit = lambda key, value: supervisor.stop.set() if key == 'bot' else None
-        with patch.object(services, 'bot_running', return_value=True), patch.object(services, 'qq_status', AsyncMock(return_value='unavailable')), patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), patch.object(services, 'napcat_running', return_value=False), patch.object(services, 'napcat_command', return_value=(['launcher'], {})), patch.object(services, 'spawn') as spawn:
+        observed = []
+        def emit(key, value):
+            observed.append((key, value))
+            if key == 'bot':
+                supervisor.stop.set()
+        supervisor.emit = emit
+        with patch.object(services, 'bot_running', return_value=True), \
+                patch.object(services, 'qq_status', AsyncMock(return_value='online')), \
+                patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), \
+                patch.object(services, 'spawn') as spawn:
             await supervisor.run()
-            spawn.assert_called_once()
+            spawn.assert_not_called()
+        self.assertTrue(any(key == 'qq' and 'SnowLuma' in value for key, value in observed))
 
-    async def test_invalid_ticket_is_not_retried_every_poll(self):
+    async def test_snowluma_offline_never_launches_napcat(self):
+        supervisor = manager.Supervisor(lambda *args: None)
+        supervisor.emit = lambda key, value: supervisor.stop.set() if key == 'bot' else None
+        with patch.object(services, 'bot_running', return_value=True), \
+                patch.object(services, 'qq_status', AsyncMock(return_value='unavailable')), \
+                patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), \
+                patch.object(services, 'napcat_running') as legacy_process, \
+                patch.object(services, 'napcat_command') as legacy_launcher:
+            await supervisor.run()
+            legacy_process.assert_not_called()
+            legacy_launcher.assert_not_called()
+
+    async def test_snowluma_disconnect_keeps_polling(self):
         supervisor = manager.Supervisor(lambda *args: None)
         cycles = []
         def emit(key, value):
@@ -84,14 +96,16 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
                 cycles.append(value)
                 if len(cycles) == 2:
                     supervisor.stop.set()
-                    supervisor.next_login_attempt = 0
         async def no_sleep(*args):
-            supervisor.next_login_attempt = 0
+            return None
         supervisor.emit = emit
-        with patch.object(services, 'bot_running', return_value=True), patch.object(services, 'qq_status', AsyncMock(return_value='unavailable')), patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), patch.object(services, 'napcat_running', return_value=True), patch.object(services, 'recover_qq_login', AsyncMock(return_value='needs_qr')) as recover, patch.object(manager.asyncio, 'sleep', no_sleep):
+        with patch.object(services, 'bot_running', return_value=True), \
+                patch.object(services, 'qq_status', AsyncMock(side_effect=['unavailable', 'online'])) as probe, \
+                patch.object(services, 'comfy_ready', AsyncMock(return_value=False)), \
+                patch.object(manager.asyncio, 'sleep', no_sleep):
             await supervisor.run()
             self.assertEqual(len(cycles), 2)
-            recover.assert_awaited_once()
+            self.assertEqual(probe.await_count, 2)
 
 
 class LoginRecoveryTests(unittest.IsolatedAsyncioTestCase):
