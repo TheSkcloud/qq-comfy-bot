@@ -27,85 +27,53 @@ class Supervisor:
         self.config = services.settings()
         self.stop = threading.Event()
         self.bot_process = None
-        self.napcat_process = None
-        self.next_napcat_attempt = 0
-        self.next_bot_attempt = 0
-        self.qr_started = 0
-        self.last_online = 0
-        self.next_login_attempt = 0
-        self.login_needs_qr = False
-        self.last_qq_state = None
-        self.last_recovery = None
-        login_checkpoint.record(ROOT,self.config,'supervisor_start','starting')
+                        self.next_bot_attempt = 0
+                self.last_online = 0
+                        self.last_qq_state = None
+                login_checkpoint.record(ROOT,self.config,'supervisor_start','starting')
 
     def start_bot(self):
         self.bot_process = services.spawn([self.config['python'], str(ROOT / 'bot.py')],
                                           str(ROOT), 'bot-console.log')
 
     async def run(self):
+        """Supervise the bot and check SnowLuma's OneBot link; never launch NapCat."""
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8), trust_env=False) as http:
             while not self.stop.is_set():
                 try:
-                    if not services.bot_running() and (not self.bot_process or self.bot_process.poll() is not None):
-                        if time.monotonic() >= self.next_bot_attempt:
-                            self.start_bot()
-                            self.next_bot_attempt = time.monotonic() + 30
-                    state = await services.qq_status(http, os.environ.get('NAPCAT_WS_URL', 'ws://127.0.0.1:3001'),
-                                                     os.environ.get('NAPCAT_TOKEN', ''), self.config['bot_qq'])
-                    if state!=self.last_qq_state:
-                        login_checkpoint.record(ROOT,self.config,'connection_change',state,previous_state=self.last_qq_state,
-                            worker_exit_code=self.napcat_process.poll() if self.napcat_process else None)
-                        self.last_qq_state=state
-                    if state == 'online':
-                        self.emit('qq', '已在线')
-                        self.qr_started = 0
-                        self.login_needs_qr = False
-                        self.next_login_attempt = time.monotonic() + 30
-                        self.emit('qr', '')
-                        self.last_online = time.time()
-                    elif state in ('wrong_account', 'token_error'):
-                        self.emit('qq', '连接账号不符' if state == 'wrong_account' else 'token 不匹配，请检查配置')
-                    elif self.config.get('qq_provider') == 'snowluma':
-                        self.emit('qq', '等待 SnowLuma，请在桌面 QQ 窗口登录')
+                    if self.config.get('qq_provider') != 'snowluma':
+                        self.emit('qq', '当前仅支持 SnowLuma，请将 launcher.json 的 qq_provider 设置为 snowluma')
+                        self.emit('bot', '未启动：接入平台配置不是 SnowLuma')
                         self.emit('qr', '')
                     else:
-                        # Never kill QQ or launch another instance every polling cycle.
-                        if time.monotonic() >= self.next_napcat_attempt and not await asyncio.to_thread(services.napcat_running, self.config):
-                            command, env = services.napcat_command(self.config)
-                            self.napcat_process = services.spawn(command, self.config['napcat_dir'], 'napcat-startup.log', env)
-                            self.next_napcat_attempt = time.monotonic() + 120
-                            self.qr_started = time.time()
-                            self.login_needs_qr = False
-                            self.last_recovery = None
-                            self.next_login_attempt = time.monotonic() + 30
-                            self.emit('qq', '正在使用已保存账号快捷登录…')
+                        if not services.bot_running() and (not self.bot_process or self.bot_process.poll() is not None):
+                            if time.monotonic() >= self.next_bot_attempt:
+                                self.start_bot()
+                                self.next_bot_attempt = time.monotonic() + 30
+                        url = os.getenv('ONEBOT_WS_URL') or os.getenv('NAPCAT_WS_URL', 'ws://127.0.0.1:3001')
+                        token = os.getenv('ONEBOT_TOKEN') or os.getenv('NAPCAT_TOKEN', '')
+                        state = await services.qq_status(http,url,token,self.config.get('bot_qq'))
+                        if state != self.last_qq_state:
+                            login_checkpoint.record(ROOT,self.config,'connection_change',state,previous_state=self.last_qq_state)
+                            self.last_qq_state = state
+                        if state == 'online':
+                            self.emit('qq', 'SnowLuma OneBot 已连接')
+                            self.last_online = time.time()
+                        elif state == 'wrong_account':
+                            self.emit('qq', 'SnowLuma 当前 QQ 账号与配置不符')
+                        elif state == 'token_error':
+                            self.emit('qq', 'SnowLuma OneBot token 不匹配')
                         else:
-                            if not self.login_needs_qr and time.monotonic() >= self.next_login_attempt:
-                                self.next_login_attempt = time.monotonic() + 120
-                                diagnostics={}
-                                recovery = await services.recover_qq_login(http, self.config,diagnostics)
-                                self.login_needs_qr = recovery == 'needs_qr'
-                                self.last_recovery = recovery
-                                login_checkpoint.record(ROOT,self.config,'login_recovery',recovery,**diagnostics)
-                                logging.info('QQ 登录恢复：%s', recovery)
-                            recovery_labels = {
-                                'needs_qr': 'QQ 需要重新登录，请扫码',
-                                'pending': 'QQ 正在登录或重连，等待 OneBot 就绪',
-                                'manual_auth': '请在 NapCat 管理页完成验证',
-                            }
-                            self.emit('qq', recovery_labels.get(self.last_recovery, '正在等待 QQ 连接…'))
-                        qr = Path(self.config['napcat_dir']) / 'cache' / 'qrcode.png'
-                        try:
-                            qr_fresh = qr.stat().st_mtime >= max(self.qr_started, self.last_online)
-                        except OSError:
-                            qr_fresh = False
-                        self.emit('qr', str(qr) if qr_fresh else '')
+                            # SnowLuma process management belongs to its own service.
+                            # A missing link never authorizes starting an old NapCat install.
+                            self.emit('qq', '等待 SnowLuma OneBot 连接，请检查 SnowLuma 和桌面 QQ')
+                        self.emit('qr', '')
+                        self.emit('bot', '运行中' if services.bot_running() else '启动失败，查看日志')
                     comfy = await services.comfy_ready(http, os.getenv('COMFYUI_URL', 'http://127.0.0.1:8188'))
                     self.emit('comfy', '已运行' if comfy else '待命 · 需要画图时自动启动')
-                    self.emit('bot', '运行中' if services.bot_running() else '启动失败，查看日志')
-                except Exception as exc:
-                    logging.error('管理器错误：%s', type(exc).__name__)
-                    self.emit('qq', str(exc)[:180])
+                except Exception:
+                    logging.exception('SnowLuma 管理器检查失败')
+                    self.emit('qq', '接入状态检查失败，详见 manager.log')
                 for _ in range(10):
                     if self.stop.is_set():
                         break
@@ -116,7 +84,7 @@ class Supervisor:
                 await asyncio.to_thread(self.bot_process.wait, 8)
             except Exception:
                 pass
-        # Leave QQ and ComfyUI alone: they may also be used by the user.
+        # Do not kill SnowLuma, QQ, or ComfyUI when closing the manager.
 
 
 def main():
@@ -190,7 +158,7 @@ def main():
         tk.Label(card, text=heading, fg='#91a4c3', bg='#172137').pack(anchor='w')
         labels[key] = tk.StringVar(value='检查中…')
         tk.Label(card, textvariable=labels[key], fg='#e5edff', bg='#172137', font=('Microsoft YaHei UI', 12, 'bold'), wraplength=610, justify='left').pack(anchor='w', pady=(7,0))
-    qr_label = tk.Label(pages['总览'], text='已有登录有效时无需扫码。\n绘图按需启动，等待期间可以继续聊天。', fg='#9bacca', bg='#0c1220', justify='center')
+    qr_label = tk.Label(pages['总览'], text='SnowLuma 使用桌面 QQ 登录。\n绘图按需启动，等待期间可以继续聊天。', fg='#9bacca', bg='#0c1220', justify='center')
     qr_label.pack(pady=5)
     config = preferences.load()
     panel = tk.Frame(pages['个性化'], bg='#172137', padx=20, pady=18)
