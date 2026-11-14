@@ -1910,12 +1910,17 @@ class Bot:
                             if not future.done():
                                 future.set_result(e)
                             continue
-                        accepted = self.accept(e)
-                        if accepted:
-                            # Background drawings/recovery tasks must never cause silent loss
-                            # of valid incoming QQ messages. Each conversation has one inbox worker.
-                            e['_ws'] = ws
-                            self.enqueue(e, *accepted)
+                        try:
+                            accepted = self.accept(e)
+                            if accepted:
+                                # Background drawings/recovery tasks must never cause silent loss
+                                # of valid incoming QQ messages. Each conversation has one inbox worker.
+                                e['_ws'] = ws
+                                self.enqueue(e, *accepted)
+                        except Exception:
+                            # A malformed incoming event or one failed session lookup must not
+                            # kill the sole QQ WebSocket receive loop.
+                            log.exception('处理 QQ 入站事件失败；接收循环继续')
                     self.connection_warning('closed_'+str(ws.close_code),delay)
             except asyncio.CancelledError:
                 for future in list(self.pending.values()):
@@ -1928,6 +1933,11 @@ class Bot:
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 self.connection_warning(type(exc).__name__,delay)
+            except Exception as exc:
+                # Keep the receiver alive even after unexpected parser/store failures.
+                # Preserve the traceback for diagnosis instead of silently restarting.
+                log.exception('QQ 接收循环异常，将尝试重新建立连接')
+                self.connection_warning('unexpected_'+type(exc).__name__,delay)
             finally:
                 self.connected.clear()
                 self.ws = None
