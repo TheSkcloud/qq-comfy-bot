@@ -1,4 +1,4 @@
-"""NapCat forward WebSocket + DeepSeek + the supplied ComfyUI workflow."""
+"""SnowLuma OneBot WebSocket + DeepSeek + local ComfyUI workflow."""
 import argparse
 import hashlib
 import contextvars
@@ -1808,28 +1808,29 @@ class Bot:
         current=time.monotonic()
         self.connection_failures=getattr(self,'connection_failures',0)+1
         if current-getattr(self,'last_connection_warning',-300)>=300 or reason!=getattr(self,'last_connection_reason',None):
-            log.warning('NapCat 不可用 (%s)，%s 秒后重连；本段累计 %s 次',reason,delay,self.connection_failures)
+            log.warning('SnowLuma OneBot 连接不可用 (%s)，%s 秒后重连；本段累计 %s 次',reason,delay,self.connection_failures)
             self.last_connection_warning=current;self.last_connection_reason=reason
 
     async def run(self):
         if not self.users:
             raise ValueError('请在 .env 的 ALLOWED_USERS 填写你的 QQ 号码')
-        headers = {'Authorization': 'Bearer ' + os.environ['NAPCAT_TOKEN']}
+        token = os.getenv('ONEBOT_TOKEN') or os.getenv('NAPCAT_TOKEN', '')
+        headers = {'Authorization': 'Bearer ' + token} if token else {}
         recovery=asyncio.create_task(self.reconcile_images())
         self.tasks.add(recovery);recovery.add_done_callback(self.tasks.discard)
         delay = 2
         while True:
             try:
-                async with self.http.ws_connect(os.getenv('NAPCAT_WS_URL', 'ws://127.0.0.1:3001'),
+                async with self.http.ws_connect(os.getenv('ONEBOT_WS_URL') or os.getenv('NAPCAT_WS_URL', 'ws://127.0.0.1:3001'),
                         headers=headers, heartbeat=30, max_msg_size=32*1024*1024) as ws:
                     self.ws = ws
                     self.connected.set()
                     self.connected_at=time.monotonic()
                     if getattr(self,'connection_failures',0):
-                        log.info('NapCat 连接恢复；离线期间失败 %s 次，等待实际消息确认收发',self.connection_failures)
+                        log.info('SnowLuma OneBot 连接恢复；离线期间失败 %s 次，等待实际消息确认收发',self.connection_failures)
                         self.connection_failures=0
                     delay = 2
-                    log.info('已连接 NapCat，等待白名单用户消息')
+                    log.info('已连接 SnowLuma OneBot，等待白名单用户消息')
                     async for message in ws:
                         if message.type != aiohttp.WSMsgType.TEXT:
                             continue
@@ -1845,10 +1846,14 @@ class Bot:
                             if not future.done():
                                 future.set_result(e)
                             continue
-                        accepted = self.accept(e)
-                        if accepted and len(self.tasks) < 20:
-                            e['_ws'] = ws
-                            self.enqueue(e, *accepted)
+                        try:
+                            accepted = self.accept(e)
+                            if accepted:
+                                # Never discard messages because unrelated GPU/background tasks are busy.
+                                e['_ws'] = ws
+                                self.enqueue(e, *accepted)
+                        except Exception:
+                            log.exception('SnowLuma OneBot 入站事件处理失败；继续监听')
                     self.connection_warning('closed_'+str(ws.close_code),delay)
             except asyncio.CancelledError:
                 for future in list(self.pending.values()):
@@ -1861,12 +1866,15 @@ class Bot:
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 self.connection_warning(type(exc).__name__,delay)
+            except Exception as exc:
+                log.exception('SnowLuma OneBot 接收循环意外失败；即将重连')
+                self.connection_warning('unexpected_'+type(exc).__name__,delay)
             finally:
                 self.connected.clear()
                 self.ws = None
                 for future in list(self.pending.values()):
                     if not future.done():
-                        future.set_exception(ConnectionError('NapCat 连接断开'))
+                        future.set_exception(ConnectionError('SnowLuma OneBot 连接断开'))
                 # Keep in-progress rendering alive across transient QQ disconnects.
             await asyncio.sleep(delay)
             delay = min(delay*2, 30)
@@ -1901,7 +1909,7 @@ async def main(check=False):
             await Comfy(http).check()
             print('ComfyUI 节点与模型选项检查通过。此检查不生成图片、不调用 DeepSeek。')
             return
-        for key in ('DEEPSEEK_API_KEY', 'NAPCAT_TOKEN'):
+        for key in ('DEEPSEEK_API_KEY',):
             value = os.getenv(key, '')
             if not value or '填写' in value or '替换' in value:
                 raise ValueError(f'请先在 .env 配置 {key}')
