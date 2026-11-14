@@ -1044,9 +1044,11 @@ class Bot:
         positions=delivery_state.positions_context(session,text)
         if positions:extra+='\n此前已实际说过的相关观点，可随新依据更正，不当作用户事实：'+json.dumps(positions,ensure_ascii=False)
         self.delivery_metric('context_ready',CURRENT.get(),context_preparation_ms=round((time.monotonic()-context_started)*1000))
-        if session.get('last_image_context'):
+        # Avoid injecting obsolete visual tasks into unrelated conversations.
+        visual_topic=explicit or bool(re.search(r'图|照片|插画|画画|拍照|镜头|构图|重画',text))
+        if visual_topic and session.get('last_image_context'):
             extra += '\n最近成功发出的虚拟插画（用户可能在评价画面，不自动重画）：'+json.dumps(session['last_image_context'],ensure_ascii=False)[:1800]
-        if session.get('last_image_job_id') or image_progress.recent_visual(session.get('history',[]),now()):
+        if visual_topic and (session.get('last_image_job_id') or image_progress.recent_visual(session.get('history',[]),now())):
             extra+='\n图片任务的真实记录：'+json.dumps(image_progress.snapshot(ROOT,session,key,now(),self.started_at),ensure_ascii=False)
             extra+='。只按这个记录描述进度；没有任务时不说在画、快了或已经发图；历史承诺不是任务已创建的证据。'
         observation=None
@@ -1060,10 +1062,9 @@ class Bot:
             session['last_media']={'at':received_at,**observation}
             self.store.save(key,session)
             return
-        fixed_visual = cache_context(session)
+        fixed_visual = cache_context(session) if explicit else ''
         if fixed_visual:
             extra += '\n'+fixed_visual+'\n仅在同一套服装或同一地点时沿用；用户明确换装、换地点时重新描述对应部分。'
-        tone = self.context.life.mood(str(e['user_id']),{},now()) if e.get('message_type')=='private' else '自然平稳，跟随用户话题。'
         model_started=time.monotonic()
         data = await deepseek(self.http, session['state'], model_history, request, explicit, context=extra,media=observation,depth=depth)
         if not explicit and image_requests.model_request(text,data):
