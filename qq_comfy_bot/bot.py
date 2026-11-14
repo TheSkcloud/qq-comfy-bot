@@ -1062,7 +1062,7 @@ class Bot:
         context_started=time.monotonic()
         depth=dialogue_depth.plan(session,text,model_history,now(),preferences.load().get('thinking_after_substantive_turns',4))
         has_media=bool(media_input.describe_segments(e.get('message',[])))
-        split=not explicit and not has_media and self.http is not None and chat_analysis.should_split(text)
+        split=not explicit and not has_media and self.http is not None and chat_analysis.should_split(text,model_history,depth,session)
         extra=await self.context.build(self.http,str(e['user_id']),text,now(),e.get('message_type')=='private',character=session['state']['character'],visual_requested=explicit,cached_only=split)
         visual_target=visual_request_context(text,model_history) if explicit else {}
         if explicit:extra+='\n本轮明确索图目标：'+json.dumps(visual_target,ensure_ascii=False)
@@ -1113,7 +1113,7 @@ class Bot:
                     extra+='\n本轮回复前整理的资料，以用户原话和已确认记录为准，直接写正文：'+json.dumps(preparation,ensure_ascii=False)
             self.scheduler.check(CURRENT.get())
         visual_call=explicit and local_visual is None
-        profile='front' if split else 'full' if visual_call else 'text'
+        profile='front' if split and analysis is not None else 'full' if visual_call else 'text'
         data = await deepseek(self.http, session['state'], model_history, request, visual_call, context=extra,media=observation,depth=depth,contract_profile=profile,analysis=analysis)
         if local_visual:data.update(local_visual)
         if not explicit and image_requests.model_request(text,data):
@@ -1911,7 +1911,9 @@ class Bot:
                                 future.set_result(e)
                             continue
                         accepted = self.accept(e)
-                        if accepted and len(self.tasks) < 20:
+                        if accepted:
+                            # Background drawings/recovery tasks must never cause silent loss
+                            # of valid incoming QQ messages. Each conversation has one inbox worker.
                             e['_ws'] = ws
                             self.enqueue(e, *accepted)
                     self.connection_warning('closed_'+str(ws.close_code),delay)
