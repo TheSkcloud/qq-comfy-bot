@@ -172,6 +172,54 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job['reason'], 'prompt_quality_rejected')
 
 
+class StabilityRoutingTests(unittest.TestCase):
+    def test_short_implicit_relationship_cue_uses_dual_call(self):
+        with patch.dict(os.environ, {'CHAT_SPLIT_MIN_CHARS': '240'}):
+            self.assertTrue(chat_analysis.should_split('你是不是讨厌我？'))
+            self.assertTrue(chat_analysis.should_split('我觉得你变了。'))
+            self.assertFalse(chat_analysis.should_split('哈哈哈哈哈哈'))
+            self.assertFalse(chat_analysis.should_split('/状态'))
+
+    def test_short_reference_uses_history_and_topic(self):
+        state = {'dialogue_state': {'topic_summary': '上周对小说手稿的修改'}}
+        with patch.dict(os.environ, {'CHAT_SPLIT_MIN_CHARS': '240'}):
+            self.assertTrue(chat_analysis.should_split(
+                '那天呢？', [{'role':'assistant','content':'我们讨论过手稿'}], None, state))
+            self.assertFalse(chat_analysis.should_split('那天呢？', [], None, state))
+            self.assertTrue(chat_analysis.should_split(
+                '你怎么看？', [], {'stage':'C', 'substantive': True}, state))
+
+    def test_split_can_be_explicitly_disabled(self):
+        with patch.dict(os.environ, {'CHAT_SPLIT_MIN_CHARS': '0'}):
+            self.assertFalse(chat_analysis.should_split('你是不是讨厌我？',
+                [{'role':'assistant','content':'test'}], {'stage':'C'}))
+
+
+class StabilityIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    asyncSetUp = test_upgrade.EntryTests.asyncSetUp
+    asyncTearDown = test_upgrade.EntryTests.asyncTearDown
+
+    async def test_failed_analysis_keeps_full_text_memory_contract(self):
+        quote = '我喜欢手写记录修改'
+        text = '最近在整理小说手稿，' + quote + '，想逐章检查情节和人物的连续性。'
+        env = patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'test',
+                                      'CHAT_SPLIT_MIN_CHARS': '20',
+                                      'SPEECH_REVIEW_ENABLED': '0'})
+        env.start()
+        self.addCleanup(env.stop)
+        model = Model({'reply': '可以按章节对照。',
+                       'memory_updates': [{'kind':'preference', 'value': quote,
+                                           'evidence': quote}]}, ['invalid analysis'])
+        model.release_analysis.set()
+        self.instance.http = model
+        self.instance.context.build.return_value = ''
+        await self.instance.handle(self.event, self.key, text)
+        self.assertEqual(len(model.requests), 2)
+        self.assertIn('memory_updates', model.requests[1]['messages'][0]['content'])
+        self.assertEqual([item['value'] for item in
+                          self.instance.context.life.facts('42')], [quote])
+
+
 class PromptTests(unittest.TestCase):
     def test_explicit_camera_visible_action_and_exclusions(self):
         from test_prompt_spec import scene
