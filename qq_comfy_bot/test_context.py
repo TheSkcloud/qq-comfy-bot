@@ -92,6 +92,29 @@ class ScheduleTests(unittest.TestCase):
         self.assertIn('示例实验室2',[c['room'] for c in nine['courses']])
 
 
+class MemoryEvidenceSafetyTests(unittest.TestCase):
+    def test_fabricated_value_is_rejected_even_with_real_quote(self):
+        with tempfile.TemporaryDirectory() as folder:
+            life = Life(folder)
+            message = '我今天在图书馆看书'
+            diagnostics = {}
+            life.record('42', [{'kind':'activity',
+                                 'value':'今天熬夜到凌晨三点',
+                                 'evidence':message}], message, NOW, diagnostics=diagnostics)
+            self.assertEqual(life.facts('42'), [])
+            self.assertEqual(diagnostics['reasons']['value_not_in_evidence'], 1)
+
+    def test_source_verbatim_value_remains_eligible(self):
+        with tempfile.TemporaryDirectory() as folder:
+            life = Life(folder)
+            message = '我喜欢热茶'
+            results = life.record('42', [{'kind':'preference',
+                                         'value':'喜欢热茶',
+                                         'evidence':message}], message, NOW)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(life.facts('42')[0]['value'], '喜欢热茶')
+
+
 class MemoryTests(unittest.TestCase):
     def test_location_changes_record_history_and_keep_users_separate(self):
         with tempfile.TemporaryDirectory() as folder:
