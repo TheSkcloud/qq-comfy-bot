@@ -141,7 +141,7 @@ class RoutingTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {'CHAT_SCHEMA_RETRY': '1', 'SPEECH_REVIEW_ENABLED': '1'}):
             await self.instance.handle(self.event, self.key, '请深入分析我为什么要保留各版本的修改顺序。' * 3)
         self.assertEqual(len(model.requests), 2)
-        self.assertEqual(model.requests[1]['thinking']['type'], 'enabled')
+        self.assertEqual(model.requests[1]['thinking']['type'], 'disabled')
         self.assertIn('这次没完成', self.packets[0][1]['message'][0]['data']['text'])
 
     async def test_simple_photo_reuses_local_routine_without_visual_planning(self):

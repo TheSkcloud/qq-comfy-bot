@@ -111,7 +111,7 @@ class EntryTests(unittest.IsolatedAsyncioTestCase):
             if len(order)==1:started.set();await release.wait()
             return str(len(order)).encode()
         self.instance.comfy.image=draw
-        cfg={**bot.preferences.load(),'drawing':d.config({'daily_budget':4})}
+        cfg={**bot.preferences.load(),'capabilities':{'image':'AUTO'},'drawing':d.config({'daily_budget':4})}
         with patch.object(bot.preferences,'load',return_value=cfg),patch.object(bot,'deepseek',AsyncMock(side_effect=lambda *a,**k:self.image_data())),patch.object(d,'inspect_image',AsyncMock(return_value={'pass':True})):
             self.instance.enqueue(self.event,self.key,'画一张')
             await asyncio.wait_for(started.wait(),3)

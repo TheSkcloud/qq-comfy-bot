@@ -68,6 +68,29 @@ class Life:
             if value not in evidence:
                 reject('MEMORY_EVIDENCE_FAILED')
                 continue
+            # A quotation or a third person's activity is not a user-owned fact.
+            # A comma may omit the same subject (我不喜欢咖啡，喜欢热茶),
+            # but never inherit ownership across a new explicit third person.
+            clauses=re.split(r'[，。！？；\n]',evidence)
+            owner=False;owned=False
+            for clause in clauses:
+                if re.match(r'^\s*(?:我(?!(?:听说|听见|听到|发现|觉得|认为|知道|看到)|的?(?:朋友|同学|老师|室友|父母|妈妈|爸爸|哥哥|姐姐|弟弟|妹妹))|本人)',clause):
+                    owner=True
+                elif re.match(r'^\s*(?:他|她|他们|她们|你|老师|同学|朋友|室友)',clause):
+                    owner=False
+                elif not re.match(r'^\s*(?:不?喜欢|更喜欢|讨厌|爱|不爱|也|还|并且|不想|想|希望)',clause):
+                    owner=False
+                if value in clause and owner:owned=True
+            # Multi-clause verbatim preference extraction has one self subject.
+            if value==evidence and clauses and re.match(r'^我(?:更?喜欢|不喜欢|讨厌)',clauses[0]):
+                owned=all(re.match(r'^(?:我)?(?:更?喜欢|不喜欢|讨厌|也|还)',c.strip()) for c in clauses if c.strip())
+            if not owned:
+                reject('MEMORY_SUBJECT_UNVERIFIED')
+                continue
+            quoted=any(evidence in quote for quote in re.findall(r'[“「](.*?)[”」]',message,re.S))
+            if quoted:
+                reject('MEMORY_QUOTED_SPEAKER')
+                continue
             value=redact(value)
             if not value:
                 reject('sensitive_value')

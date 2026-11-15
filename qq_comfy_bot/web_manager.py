@@ -120,7 +120,7 @@ class Dashboard:
             autostart=autostart.enabled(),drawing_effective=image_mode.effective(preferences.load()),qr_version=qr_version,need_qr=bool(qr_version) and not str(self.state.get('qq')).startswith('已在线')))
 
     async def get_preferences(self,request):
-        return web.json_response(preferences.load())
+        return web.json_response({**preferences.load(),'drawing_effective':image_mode.effective(preferences.load())})
 
     async def set_preferences(self,request):
         try:

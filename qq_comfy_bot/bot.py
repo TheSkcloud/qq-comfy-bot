@@ -24,6 +24,7 @@ import services
 import dialogue
 from context_snapshot import ContextSnapshot
 from input_ledger import InputLedger
+import dialogue_planner
 import chat_analysis
 import preferences
 import speech
@@ -37,6 +38,7 @@ import dialogue_depth
 import image_progress
 import image_requests
 import delivery_state
+import capability_registry
 import image_mode
 import image_concept
 from gpu_memory_manager import GPUManager
@@ -354,12 +356,12 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
         body['messages'][-1]['content']=[{'type':'text','text':user}]+media['blocks']
     url = os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com').rstrip('/') + '/chat/completions'
     depth=depth or dialogue_depth.plan({},user,history,current,preferences.load().get('thinking_after_substantive_turns',4))
-    thinking=force_image or dialogue_depth.should_think(depth)
+    thinking=(force_image or dialogue_depth.should_think(depth)) and not front_only
     body['thinking']={'type':'enabled' if thinking else 'disabled'}
     if thinking:body.update(reasoning_effort='medium',max_tokens=6000 if force_image else 8192 if depth['stage']=='C' else 4096)
     system_base+='\n'+dialogue_depth.context(depth,include_update=not front_only)
     if force_image:system_base+='\n'+image_concept.instruction()+'\n'+VISUAL_CONSTRAINTS
-    elif text_contract and not front_only and os.getenv('IMAGE_MODE','off')=='auto':
+    elif text_contract and not front_only and capability_registry.resolve(preferences.load()).permits('character_auto'):
         system_base+='\n可用 image_value:{suitable,veto,kind:comfort/comic,reason} 标记有真实情绪或共同笑点的分享机会，无合适事件省略。'
     preparation_ms=round((time.monotonic()-preparation_started)*1000)
     attempts=2 if not front_only and os.getenv('CHAT_SCHEMA_RETRY','0')=='1' else 1
@@ -374,6 +376,8 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
             body['messages'][0]['content'] += '\n这是用户明确的视觉请求，也可能承接上一轮的动作/海报等话题。不要求用户再说一次拍照或画图，不回复“想看就直说”、不把提供插画推迟到某天整理；以当前角色、服装和地点呈现想看的画面，不声称持有真实照片或官方海报。'
             body['messages'][0]['content'] += '\n历史assistant消息为了节省上下文只保留reply，不是本轮输出模板。本轮必须另给send_image:true、完整visual_tags和完整visual_scene五字段，不能只给reply。'
         body['messages'][0]['content'] += '\n<本轮聊天表达，适用于reply字段>\n'+speech.instruction(user, history)+'\n</本轮聊天表达>'
+        if not force_image:
+            body['messages'][0]['content']+='\n<本轮回应规划>\n'+dialogue_planner.plan(user,history,depth.get('state')).prompt()+'\n</本轮回应规划>'
         api_started=time.monotonic()
         async with http.post(url, json=body, headers={
                 'Authorization': 'Bearer ' + os.environ['DEEPSEEK_API_KEY']}) as r:
@@ -751,7 +755,7 @@ class Bot:
         instruction=image_director.image_instruction(text,history)
         if text.strip()=='/重置':instruction='cancel'
         if request_action['action'] in ('amend','cancel'):instruction=request_action['action']
-        if explicit_request and not any(not t.done() for t in getattr(self,'image_warmups',[])):
+        if explicit_request and capability_registry.resolve(preferences.load()).permits('user_explicit') and not any(not t.done() for t in getattr(self,'image_warmups',[])):
             warm=asyncio.create_task(self.warm_image_engine())
             self.image_warmups=[warm];self.tasks.add(warm);warm.add_done_callback(self.tasks.discard)
         event={**event,'_queued_at':time.monotonic(),'_explicit_image_request':explicit_request}
@@ -1114,7 +1118,9 @@ class Bot:
         context_started=time.monotonic()
         depth=dialogue_depth.plan(session,text,model_history,now(),preferences.load().get('thinking_after_substantive_turns',4))
         has_media=bool(media_input.describe_segments(e.get('message',[])))
-        split=not explicit and not has_media and self.http is not None and chat_analysis.should_split(text)
+        route_split,route_reason=chat_analysis.route(text,session.get('dialogue_state') or depth['state'],model_history)
+        split=not explicit and not has_media and self.http is not None and route_split
+        self.delivery_metric('semantic_route',CURRENT.get(),route='dual' if split else 'single',reason=route_reason)
         try:
             extra=await asyncio.wait_for(self.context.build(self.http,str(e['user_id']),text,now(),e.get('message_type')=='private',character=session['state']['character'],visual_requested=explicit,cached_only=split),8)
         except (asyncio.TimeoutError,aiohttp.ClientError,OSError,ValueError) as exc:
@@ -1154,10 +1160,13 @@ class Bot:
         if fixed_visual:
             extra += '\n'+fixed_visual+'\n仅在同一套服装或同一地点时沿用；用户明确换装、换地点时重新描述对应部分。'
         tone = self.context.life.mood(str(e['user_id']),{},now()) if e.get('message_type')=='private' else '自然平稳，跟随用户话题。'
-        snapshot=ContextSnapshot.capture(key,input_id,session,model_history,extra,session.get('dialogue_state') or depth['state'])
+        dialogue_plan=dialogue_planner.plan(text,model_history,session.get('dialogue_state'))
+        # Response policy is inserted as an instruction at the model boundary.
+        snapshot=ContextSnapshot.capture(key,input_id,session,model_history,extra,session.get('dialogue_state') or depth['state'],
+            capabilities=image_mode.effective(preferences.load()),dialogue_plan=vars(dialogue_plan))
         frozen=snapshot.slice()
         model_history=frozen['history'];extra=frozen['context']
-        self.delivery_metric('context_snapshot',CURRENT.get(),snapshot_id=snapshot.snapshot_id)
+        self.delivery_metric('context_snapshot',CURRENT.get(),snapshot_id=snapshot.snapshot_id,primary_act=dialogue_plan.primary_act,response_depth=dialogue_plan.response_depth,capability_mode=snapshot.slice('planning')['capabilities']['effective_mode'])
         model_started=time.monotonic()
         analysis=None
         if split:
@@ -1276,6 +1285,15 @@ class Bot:
 
     async def start_drawing(self,e,key,text,session,data,plan,explicit):
         import social_reasoning
+        effective=capability_registry.resolve(preferences.load())
+        origin='user_explicit' if explicit else 'character_auto'
+        if not effective.permits(origin):
+            if explicit:data['_image_failure']='capability_'+effective.effective_mode.lower()
+            reason='capability_'+effective.effective_mode.lower()
+            job=e.get('_pending_image_job')
+            if job:job.record('cancelled',reason=reason)
+            self.image_decision_record(key,{'allowed':False,'reason':reason,'effective_mode':effective.effective_mode,'config_revision':effective.config_revision})
+            return
         directed=all(image_director.user_transition(item['field'],text) for item in data.get('_scene_changes',[]) if item.get('field') in ('clothing','location','hairstyle'))
         if data['state']!=session['state'] and (not explicit or not directed):
             data['_drawing_deferred']=True
@@ -1283,12 +1301,12 @@ class Bot:
         data['_scene_authorization']={'base_version':session.get('scene_version',0),'state':copy.deepcopy(data['state']),
             'source':'explicit_user' if explicit and directed else 'acknowledged_scene'}
         # Explicit requests work regardless of auto mode; otherwise images are opt-in.
-        auto = os.getenv('IMAGE_MODE', 'off') == 'auto' and not data.get('_text_only_recovery') and not social_reasoning.boundary_blocks(session,text,now())
+        auto = capability_registry.resolve(preferences.load()).permits('character_auto') and not data.get('_text_only_recovery') and not social_reasoning.boundary_blocks(session,text,now())
         settings=preferences.load()
         if not explicit and image_requests.latest(session) and image_progress.snapshot(ROOT,session,key,now(),self.started_at)['status'] in image_progress.ACTIVE|{'interrupted','outcome_unknown','recovered_output','not_started'}:
             self.image_decision_record(key,{'allowed':False,'reason':'unresolved_explicit_request'})
             return
-        if not explicit and auto and settings.get('spontaneous_images',True):
+        if not explicit and auto:
             import image_candidates
             candidate_data=data
             candidate=image_candidates.conversation(key,session,text,data,now())
@@ -1305,7 +1323,7 @@ class Bot:
                 self.tasks.add(task);task.add_done_callback(self.tasks.discard)
                 data['_candidate_scheduled']=True
                 return
-        decision=image_director.decide(session,text,data,now(),settings['drawing'],auto and settings.get('spontaneous_images',True))
+        decision=image_director.decide(session,text,data,now(),settings['drawing'],auto)
         pending_job=e.get('_pending_image_job')
         decision.setdefault('image_task_id',pending_job.id if pending_job else uuid.uuid4().hex)
         if explicit and decision['reason']!='user_declined':
@@ -1402,6 +1420,7 @@ class Bot:
 
     @staticmethod
     def image_failure_notice(reason):
+        if reason.startswith('capability_'):return '当前绘图功能已关闭，图片没有开始生成。'
         if reason=='queue_full':return '这张暂时排不进去，等前面的画完再试吧。'
         if reason=='prompt_quality_rejected':return '这次画面要求没能整理成可用的提示词，图片还没开始生成。'
         return '这次没能补全画面的服装、地点或动作，图片没有开始生成。'
@@ -1532,7 +1551,7 @@ class Bot:
                 item['job'].record('cancelled',reason='worker_stopped')
 
     async def send_reaction(self,event,key,session,reaction,text):
-        if reaction=='none' or not preferences.load()['reactions'] or speech.plan(text,[])['mode'] in ('help','vent','closing','exit'):
+        if reaction=='none' or not capability_registry.resolve(preferences.load(),'reaction').permits('character_auto') or speech.plan(text,[])['mode'] in ('help','vent','closing','exit'):
             return False
         current=now()
         recent=session.get('reaction_history',[])
@@ -1568,6 +1587,8 @@ class Bot:
         started=time.monotonic()
         remaining_ttl=max(0,cfg['task_ttl_seconds']-(time.time()-job.data['created_at'] if job else 0))
         def valid():
+            origin='user_explicit' if not job or job.data['decision'].get('kind')=='explicit' else 'character_auto'
+            if not capability_registry.resolve(preferences.load()).permits(origin):return False
             live=self.store.get(key)
             task=self.image_active.get(key) or self.image_tasks.get(key)
             if job and job.data['decision'].get('kind')!='explicit':
@@ -1575,7 +1596,7 @@ class Bot:
                 candidate=job.data.get('candidate') or {}
                 if social_reasoning.boundary_blocks(live,candidate.get('character_activity',''),now()):return False
                 settings=preferences.load()
-                if not settings.get('spontaneous_images',True):return False
+                if not capability_registry.resolve(settings).permits('character_auto'):return False
                 if live.get('busy_until') and datetime.fromisoformat(live['busy_until'])>now():return False
                 today=now().date().isoformat()
                 sends=[a for a in live.get('drawing_sends',[]) if a.get('day')==today and a.get('kind')!='explicit']
@@ -1584,7 +1605,7 @@ class Bot:
                 kind=job.data['decision'].get('kind')
                 limit=settings['drawing'].get('kind_limits',{}).get(kind)
                 if limit and sum(a.get('kind')==kind for a in sends)>=limit['daily_budget']:return False
-            initiative_ok=not (job and job.data.get('initiative')) or (preferences.load().get('proactive_enabled',False) and preferences.load().get('spontaneous_images',True) and (not live.get('busy_until') or datetime.fromisoformat(live['busy_until'])<=now()))
+            initiative_ok=not (job and job.data.get('initiative')) or (capability_registry.resolve(preferences.load(),'proactive_image').permits('character_auto') and (not live.get('busy_until') or datetime.fromisoformat(live['busy_until'])<=now()))
             return (initiative_ok and self.image_scene_valid(key,scene,job) and time.monotonic()-started<remaining_ttl
                     and (not task or not task.cancelling())
                     and (not job or live.get('scene_hair','')==job.snapshot.get('hairstyle','') or
@@ -1803,7 +1824,7 @@ class Bot:
         self.image_decision_record(key,{'image_task_id':candidate['candidate_id'],'related_event_id':candidate['dedupe_key'],'kind':candidate['source_type'],'status':'candidate','reason':candidate['trigger_reason']})
         session=self.store.get(key)
         data=dict(data or {})
-        decision=image_director.decide(session,candidate['character_activity'],{**data,'_candidate':candidate},now(),settings['drawing'],settings.get('spontaneous_images',True))
+        decision=image_director.decide(session,candidate['character_activity'],{**data,'_candidate':candidate},now(),settings['drawing'],capability_registry.resolve(settings).permits('character_auto'))
         decision.setdefault('image_task_id',candidate['candidate_id'])
         self.image_decision_record(key,decision)
         if not decision['allowed']:return
@@ -1840,9 +1861,9 @@ class Bot:
         if live['state']!=candidate['scene_description'] or datetime.fromisoformat(candidate['expires_at'])<=now():
             job.record('expired',reason='candidate_expired_or_scene_changed')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'candidate_expired_or_scene_changed'});return
-        if not settings.get('spontaneous_images',True) or not preferences.load().get('spontaneous_images',True):
+        if not capability_registry.resolve(preferences.load()).permits('character_auto'):
             job.record('cancelled',reason='automatic_images_disabled');return
-        if event.get('_initiative') and not preferences.load().get('proactive_enabled',False):
+        if event.get('_initiative') and not capability_registry.resolve(preferences.load(),'proactive_image').permits('character_auto'):
             job.record('cancelled',reason='initiative_disabled');return
         if live.get('busy_until') and datetime.fromisoformat(live['busy_until'])>now():
             job.record('cancelled',reason='user_busy');return
@@ -1865,7 +1886,7 @@ class Bot:
     async def initiative_tick(self):
         import initiative,image_candidates
         settings=preferences.load()
-        if os.getenv('IMAGE_MODE','off')!='auto' or not settings.get('proactive_enabled',False):return
+        if not capability_registry.resolve(settings,'proactive_image').permits('character_auto'):return
         if time.monotonic()-getattr(self,'connected_at',0)<60:return
         for user in sorted(self.users):
             key=f'private:0:{user}'
@@ -1885,6 +1906,8 @@ class Bot:
 
     async def send_recovered(self,event,key,session):
         from image_recovery import load_job
+        if not capability_registry.resolve(preferences.load()).permits('user_explicit'):
+            return await self.send(event,'当前绘图功能已关闭，保留的图片没有发送。')
         status=image_progress.snapshot(ROOT,session,key,now(),self.started_at)
         if status['status']!='recovered_output':return await self.send(event,status['text'])
         job=load_job(ROOT/'data'/'image_jobs'/status['job_id']/'job.json')

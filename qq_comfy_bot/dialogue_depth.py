@@ -150,4 +150,5 @@ def finish(session,user,spoken,data,decision,current):
     state['dialogue_update_status']='accepted' if grounded else 'missing' if not update else 'invalid_evidence'
     state['missing_update_turns']=0 if grounded else int(state.get('missing_update_turns',0))+1
     state['transition_reason']=decision.get('transition_reason','same_discussion')
+    state['revision']=session.get('dialogue_state',{}).get('revision',0)+1
     session['dialogue_state']=state

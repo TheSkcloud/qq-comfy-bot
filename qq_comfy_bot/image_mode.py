@@ -2,12 +2,15 @@
 import os
 def effective(settings,mode=None):
     mode=(mode if mode is not None else os.getenv('IMAGE_MODE','off')).strip().lower()
-    automatic=mode=='auto'
-    spontaneous=automatic and settings.get('spontaneous_images',True)
-    proactive=spontaneous and settings.get('proactive_enabled',False)
-    return {'mode':mode if mode in ('off','auto') else 'off','explicit_requests':True,
-        'spontaneous_enabled':bool(spontaneous),'proactive_enabled':bool(proactive),
-        'reason':'global_mode_off' if not automatic else 'spontaneous_preference_off' if not spontaneous else 'active'}
+    from capability_registry import resolve
+    image=resolve(settings,'image',mode)
+    proactive=resolve(settings,'proactive_image',mode)
+    return {'mode':mode if mode in ('off','auto') else 'off',
+        'effective_mode':image.effective_mode,'config_revision':image.config_revision,
+        'explicit_requests':image.permits('user_explicit'),
+        'spontaneous_enabled':image.permits('character_auto'),
+        'proactive_enabled':proactive.permits('character_auto'),
+        'reason':image.reason}
 
 def description(settings):
     value=effective(settings)
