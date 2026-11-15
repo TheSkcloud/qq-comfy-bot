@@ -23,8 +23,11 @@ from dotenv import load_dotenv
 import services
 import dialogue
 from context_snapshot import ContextSnapshot
+from task_coordinator import TaskCoordinator,lane
+from state_committer import StateCommitter
 from input_ledger import InputLedger
 import dialogue_planner
+import tone_guard
 import chat_analysis
 import preferences
 import speech
@@ -426,6 +429,8 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
                         data['response_plan']={**data['response_plan'],'segments':[reply]}
                 else:
                     data=await repair_grounding(http,data,user,history,url,grounding_flags)
+            if tone_guard.issues(data['reply']):
+                data=await repair_grounding(http,data,user,history,url,tone_guard.issues(data['reply']))
             data['_local_speech_issues']=speech.issues(data['reply'],user,history)
             if not front_only and os.getenv('SPEECH_REVIEW_ENABLED','0') == '1' and not data.get('_grounding_repair') and data['response_plan']['mode']=='text':
                 revised = await review_speech(http, data, user, history, body['messages'][0]['content'], url)
@@ -478,7 +483,7 @@ async def repair_grounding(http,data,user,history,url,issues):
     started=time.monotonic()
     result['_grounding_repair']={'issues':issues,'draft':data['reply'],'applied':False}
     body={'model':os.getenv('DEEPSEEK_MODEL','deepseek-flash'),'thinking':{'type':'disabled'},'response_format':{'type':'json_object'},'max_tokens':400,
-        'messages':[{'role':'system','content':'只修正虚拟角色中文聊天正文，输出JSON {"reply":"正文"}。保持冷淡克制的口吻。根据用户资料给自己的反应，不提问、不嘘寒问暖。若问题是重要事件只回嗯，补成一句具体而简短的态度，不复述一段。删去没有原话依据的熬夜、准备时长等用户过往经历，保留对当前成绩的反应，不把祝贺改成原因未知。若问题是未提供原因，删去未给出的评审、导师、资源、名额或当场表现，不补另一种猜测，原因未知就承认未知。不把短回复强行变长。'},
+        'messages':[{'role':'system','content':'只修正虚拟角色中文聊天正文，输出JSON {"reply":"正文"}。保持冷静克制但不贬低用户；若列出语气问题，去掉活该、不冤、别指望等惩罚或羞辱表达，不推断用户动机，保留针对事件的具体看法。根据用户资料给自己的反应，不提问、不嘘寒问暖。若问题是重要事件只回嗯，补成一句具体而简短的态度，不复述一段。删去没有原话依据的熬夜、准备时长等用户过往经历，保留对当前成绩的反应，不把祝贺改成原因未知。若问题是未提供原因，删去未给出的评审、导师、资源、名额或当场表现，不补另一种猜测，原因未知就承认未知。不把短回复强行变长。'},
                       {'role':'user','content':json.dumps({'recent_user_messages':[m['content'] for m in history[-6:] if m.get('role')=='user'],'message':user,'draft':data['reply'],'issues':issues},ensure_ascii=False)}]}
     try:
         async with http.post(url,json=body,headers={'Authorization':'Bearer '+os.environ['DEEPSEEK_API_KEY']}) as response:
@@ -487,12 +492,13 @@ async def repair_grounding(http,data,user,history,url,issues):
         import social_reasoning
         if not isinstance(reply,str) or not reply.strip() or social_reasoning.grounding_issues(reply,user,history):
             reply=social_reasoning.safe_grounded_reply(data['reply'],user,history)
+        if tone_guard.issues(reply):reply=tone_guard.fallback(reply)
         result['reply']=reply
         result['response_plan']={**result['response_plan'],'segments':[reply]}
         result['_grounding_repair']['applied']=True
     except (aiohttp.ClientError,asyncio.TimeoutError,ValueError,KeyError,TypeError,IndexError):
         import social_reasoning
-        result['reply']=social_reasoning.safe_grounded_reply(data['reply'],user,history)
+        result['reply']=tone_guard.fallback(social_reasoning.safe_grounded_reply(data['reply'],user,history))
         result['response_plan']={**result['response_plan'],'segments':[result['reply']]}
         result['_grounding_repair']['fallback']=True
     result.setdefault('_stage_times',{})['grounding_repair_ms']=round((time.monotonic()-started)*1000)
@@ -538,7 +544,8 @@ class Bot:
         self.http = http
         self.comfy = Comfy(http)
         (ROOT / 'data').mkdir(exist_ok=True)
-        self.store = Store(ROOT / 'data' / 'sessions.db')
+        self.coordinator=TaskCoordinator()
+        self.store = StateCommitter(Store(ROOT / 'data' / 'sessions.db'),self.coordinator)
         self.input_ledger = InputLedger(ROOT / 'data' / 'inputs.db')
         self.users, self.groups = ids('ALLOWED_USERS'), ids('ALLOWED_GROUPS')
         self.pending, self.locks, self.cooldowns = {}, {}, {}
@@ -551,13 +558,14 @@ class Bot:
         self.image_active = {}
         self.image_planning = {}
         self.image_epochs = {}
-        self.image_slots = image_director.PrioritySlots()
+        self.image_slots = self.coordinator.gpu
         self.activity = {}
         self.last_reaction = {}
         self.typing_users = set()
         self.inbox = {}
         self.inbox_workers = {}
         self.context = ContextEngine(ROOT)
+        self.store.recover(self.context.life)
         self.scheduler = ReplyScheduler()
         self.comfy.gpu.internal_busy=lambda:bool(self.image_load() or self.image_tasks or self.inbox_workers)
         self.started_at=time.time()
@@ -850,7 +858,7 @@ class Bot:
         try:
             async with self.locks.setdefault(key,asyncio.Lock()):
                 self.scheduler.check(ticket)
-                await self.scheduler.run(ticket,self.respond(event,key,text))
+                await self.scheduler.run(ticket,self.coordinator.run('control' if text.startswith('/') else 'text',lambda:self.respond(event,key,text)))
             return True
         except Superseded:
             image_job=event.get('_pending_image_job')
@@ -1224,9 +1232,9 @@ class Bot:
             elif plan['intent'] in ('acknowledge','closing'):ticket.pace='fast'
         # User evidence can be recorded independently of a cancelled assistant reply.
         if e.get('message_type')=='private':
-            self.context.companion.touch(str(e['user_id']),session['state']['character'],now())
+            self.store.effect(self.context.companion.touch,str(e['user_id']),session['state']['character'],now())
             memory_counts={}
-            self.context.life.record(str(e['user_id']),data.get('memory_updates',[]),text,now(),diagnostics=memory_counts)
+            self.store.effect(self.context.life.record,str(e['user_id']),data.get('memory_updates',[]),text,now(),diagnostics=memory_counts)
             self.delivery_metric('memory_extraction',CURRENT.get(),memory_extraction=data.get('_memory_extraction',{'status':'missing'}),memory_result=memory_counts,reply_only_recovery=bool(data.get('_text_only_recovery')))
         social_reasoning.remember(session,data,now())
         if observation:session['last_media']={'at':received_at,**observation}
@@ -1236,11 +1244,11 @@ class Bot:
         def commit(spoken=None,ack=None,complete=False):
             nonlocal session,affect_committed
             session=self.store.get(key)
+            accepted=False
             if spoken:
-                delivery_state.acknowledge(session,data,dialogue.render_time(spoken,now()),text,ack,now(),complete)
-                if data.get('carry_resolution') in ('included','irrelevant'):session.pop('pending_essential',None)
-            if complete and not affect_committed and e.get('message_type')=='private':
-                self.context.life.mood(str(e['user_id']),data.get('affect',{}),now(),event_id=input_id)
+                session,accepted=self.store.acknowledge(key,input_id,data,dialogue.render_time(spoken,now()),text,ack,now(),complete,affect_user=str(e['user_id']) if e.get('message_type')=='private' else None)
+            if complete and accepted and not affect_committed and e.get('message_type')=='private':
+                session=self.store.drain_affect(key,self.context.life)
                 affect_committed=True
             self.store.save(key,session)
         await self.start_drawing(e,key,request if explicit else text,session,data,plan,explicit)
@@ -1369,6 +1377,7 @@ class Bot:
         return (authorization.get('source')=='explicit_user' and authorization.get('state')==scene
                 and live.get('scene_version',0)==authorization.get('base_version'))
 
+    @lane('background')
     async def prepare_image(self,event,key,text,data,decision,settings,explicit,job,epoch):
         token=CURRENT.set(None)
         timing_token=reply_timing.set(None)
@@ -1800,6 +1809,7 @@ class Bot:
                 log.warning('追加聊天发送失败；生图继续')
                 return
 
+    @lane('background')
     async def prepare_candidate(self,event,key,candidate,settings,data=None):
         try:
             async with self.comfy.gpu.reservation():
