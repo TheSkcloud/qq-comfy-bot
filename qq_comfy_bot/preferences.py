@@ -21,6 +21,11 @@ def load():
 
 def save(values):
     previous=load()
+    values=dict(values)
+    if 'capabilities' in values and isinstance(values['capabilities'],dict):
+        values['capabilities']={**previous.get('capabilities',{}),**values['capabilities']}
+    elif 'spontaneous_images' in values and previous.get('capabilities',{}).get('image'):
+        values['capabilities']={**previous['capabilities'],'image':'AUTO' if values['spontaneous_images'] else 'MANUAL'}
     drawing={**previous.get('drawing',{}),**values.get('drawing',{})} if isinstance(values.get('drawing',{}),dict) else values.get('drawing')
     values = {**previous, **values, 'drawing':drawing}
     mode = values.get('romance_mode', 'slow')
@@ -29,6 +34,12 @@ def save(values):
     clean = dict(proactive_enabled=bool(values.get('proactive_enabled',False)), romance_mode=mode, spontaneous_images=bool(values.get('spontaneous_images', True)), reactions=bool(values.get('reactions', True)), image_chat=bool(values.get('image_chat', True)), notes_auto=bool(values.get('notes_auto',True)),
                  image_chat_interval=max(5, min(30, int(values.get('image_chat_interval', 10)))),
                  image_chat_max=max(0, min(4, int(values.get('image_chat_max', 4)))))
+    from capability_registry import MODES
+    capabilities=values.get('capabilities',{})
+    if not isinstance(capabilities,dict) or any(k not in ('image','proactive_image','reaction') or (not isinstance(v,str) or v not in MODES) for k,v in capabilities.items()):
+        raise ValueError('Invalid capability configuration')
+    clean['capabilities']=dict(capabilities)
+    if 'image' in capabilities:clean['spontaneous_images']=capabilities['image']=='AUTO'
     from image_director import config
     clean['drawing'] = config(values.get('drawing'))
     from reply_scheduler import timing_config

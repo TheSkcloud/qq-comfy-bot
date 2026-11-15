@@ -2,12 +2,22 @@
 import re
 from datetime import datetime,timedelta
 EMOTIONS={'neutral','disappointment','frustration','unfairness','self_deprecation','sadness','excitement','pride','fatigue'}
-STOP=re.compile(r'(?:不想|不愿|不要|别|不再|先不).{0,3}(?:聊|提|说|讨论|分析)|不聊(?:了|这个|这件事|这事)|不说(?:了|这个|这件事|这事)')
+STOP=re.compile(r'(?:不想|不愿|不要|别|不再|先不)(?:再|继续|跟我|和我|对我|给我|跟你|和你)?(?:聊|提|说|讨论|分析)(?:了|这个|这件事|这事|这些|那件事|下去|一下)?|不聊(?:了|这个|这件事|这事)|不说(?:了|这个|这件事|这事)')
 REOPEN=re.compile(r'继续聊|重新聊|还是聊|还是说说|再谈谈|回到.{0,8}(?:话题|问题)|我想聊|我想说')
 
 
+def stop_requested(text):
+    # Reported dialogue is context, not an instruction to this companion.
+    direct=re.sub(r'[“「].*?[”」]', '', text, flags=re.S)
+    for match in STOP.finditer(direct):
+        prefix=re.split(r'[，。！？；\n]',direct[:match.start()])[-1]
+        if re.search(r'(?:他说|她说|老师说|同学说|朋友说|写道|原话|当时说|曾说)',prefix):continue
+        return True
+    return False
+
+
 def boundary_update(session,text,current):
-    if STOP.search(text):
+    if stop_requested(text):
         topic=re.split(r'别提|不想聊|不要聊|不聊|别说|不要说|不说',text,maxsplit=1)[0].strip('，。！？ ')
         if not topic or len(topic)>40 or topic in {'我','我现在','我暂时','我只是','这件事','这个','那件事','这事'}:
             topic=next((m.get('content','')[:100] for m in reversed(session.get('history',[])) if m.get('role')=='user'),'当前话题')
@@ -32,7 +42,7 @@ def boundary_blocks(session,text,current):
         if datetime.fromisoformat(boundary['expires_at'])<=current:return False
     except (KeyError,ValueError,TypeError):return False
     if not text:return True  # Background initiative must not reopen a recently rejected subject.
-    if STOP.search(text):return True
+    if stop_requested(text):return True
     topic=boundary.get('topic','')
     terms={topic[i:i+2] for i in range(len(topic)-1)}-{'这个','那个','今天','刚才','事情','话题'}
     return bool(sum(t in text for t in terms)>=2 or topic in text)

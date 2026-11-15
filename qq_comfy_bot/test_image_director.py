@@ -102,7 +102,7 @@ class ImageDirectorTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as folder,patch.object(bot,'ROOT',Path(folder)):
             instance=bot.Bot(None);key='private:0:42';instance.store.save(key,self.session)
             instance.comfy.image=AsyncMock(return_value=b'pixels')
-            job=d.Job(Path(folder)/'jobs',d.freeze(self.session,self.data,{'style':'life'},self.current,{}),{'priority':0},'prompt',1)
+            job=d.Job(Path(folder)/'jobs',d.freeze(self.session,self.data,{'style':'life'},self.current,{}),{'priority':0,'kind':'explicit'},'prompt',1)
             with patch.object(d,'inspect_image',AsyncMock(return_value={'pass':True})):
                 task=asyncio.create_task(instance.render_live({'message_type':'private','user_id':42},key,'prompt',[],self.session['state'],1,job=job))
                 instance.image_tasks[key]=task
@@ -117,7 +117,7 @@ class ImageDirectorTests(unittest.IsolatedAsyncioTestCase):
             handed=asyncio.Event();ack=asyncio.Event()
             async def call(*a):handed.set();await ack.wait();return {'message_id':123}
             instance.call=call
-            job=d.Job(Path(folder)/'jobs',d.freeze(self.session,self.data,{'style':'life'},self.current,{}),{'priority':0},'prompt',1)
+            job=d.Job(Path(folder)/'jobs',d.freeze(self.session,self.data,{'style':'life'},self.current,{}),{'priority':0,'kind':'explicit'},'prompt',1)
             with patch.object(d,'inspect_image',AsyncMock(return_value={'pass':True})):
                 task=asyncio.create_task(instance.render_live({'message_type':'private','user_id':42},key,'prompt',[],self.session['state'],1,job=job));instance.image_tasks[key]=task
                 await asyncio.wait_for(handed.wait(),1);task.cancel();ack.set();await asyncio.wait_for(task,1)

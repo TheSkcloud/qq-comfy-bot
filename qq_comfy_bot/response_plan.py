@@ -12,6 +12,16 @@ def decode(content, force_image=False):
     try:
         return json.loads(content)
     except json.JSONDecodeError:
+        # Literal control characters in strings are recoverable only as text.
+        # Never trust repaired state, affect, memory or image authorization.
+        if not force_image:
+            try:
+                repaired=json.loads(content,strict=False)
+                reply=repaired.get('reply') if isinstance(repaired,dict) else None
+                if isinstance(reply,str) and 0<len(reply.strip())<=4000:
+                    return {'reply':reply,'state':{},'send_image':False,'visual_tags':'',
+                            '_model_format':'control_character_text_recovered','_text_only_recovery':True}
+            except (ValueError,TypeError):pass
         try:
             first,end=json.JSONDecoder().raw_decode(content)
             tail=content[end:].strip()

@@ -144,7 +144,8 @@ class EntryTests(unittest.IsolatedAsyncioTestCase):
         session=self.instance.store.get(self.key)
         candidate=image_candidates.make('life',self.key,'reading','test_activity','在房间读书',session,bot.now())
         self.instance.comfy.image=AsyncMock()
-        with patch.object(bot,'deepseek',model):
+        cfg={**bot.preferences.load(),'capabilities':{'image':'AUTO'}}
+        with patch.object(bot,'deepseek',model),patch.object(bot.preferences,'load',return_value=cfg):
             planning=asyncio.create_task(self.instance.prepare_candidate(self.event,self.key,candidate,bot.preferences.load()))
             await asyncio.wait_for(started.wait(),1)
             self.instance.enqueue(self.event,self.key,'取消画图')
