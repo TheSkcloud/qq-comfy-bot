@@ -45,3 +45,20 @@ def validate_graph(graph, info):
         done.add(nid)
     for nid in graph:
         visit(nid)
+
+
+def output_images(entry, graph=None):
+    from art_styles import node_id
+    outputs = entry.get('outputs', {})
+    if not isinstance(outputs, dict):
+        return []
+    prompt = entry.get('prompt')
+    if not graph and isinstance(prompt, list) and len(prompt)>2 and isinstance(prompt[2], dict):
+        graph = prompt[2]
+    if graph and any(isinstance(node,dict) and node.get('class_type')=='SaveImage' for node in graph.values()):
+        return outputs.get(node_id(graph, 'SaveImage'), {}).get('images', [])
+    # Old receipts may lack the submitted graph. Only one final image node is unambiguous.
+    candidates = [[image for image in node.get('images', []) if isinstance(image,dict) and image.get('type','output')=='output']
+                  for node in outputs.values() if isinstance(node,dict)]
+    candidates = [images for images in candidates if images]
+    return candidates[0] if len(candidates)==1 else []

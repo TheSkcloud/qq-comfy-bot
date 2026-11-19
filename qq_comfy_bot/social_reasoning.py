@@ -112,6 +112,9 @@ def grounding_issues(reply,text,history):
     source='\n'.join(m.get('content','') for m in history[-6:] if m.get('role')=='user')+'\n'+text
     issues=[]
     # A concrete past effort must not be invented even in an upbeat achievement reply.
+    narration = re.sub(r'[“「].*?[”」]', '', reply, flags=re.S)
+    if re.search(r'(?:没听出|没看出|看不出|听不出).{0,14}(?:打什么主意|另有目的)', narration) and not re.search(r'主意|另有目的|怀疑', source):
+        issues.append('用户在叙述对话，缺少对方另有目的的依据；不要用反问暗示用户迟钝')
     effort=r'熬.{0,4}夜|通宵|没睡|失眠'
     for clause in re.split(r'[。！？!?\n]',reply):
         if re.search(r'如果|假如|要是|可能|建议|不要|别再',clause):continue

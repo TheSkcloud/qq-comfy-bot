@@ -9,7 +9,7 @@ import weakref
 from datetime import datetime
 import io
 
-RUBRIC='visual-qa-v4-prompt-scope'
+RUBRIC='visual-qa-v5-art-direction'
 _loops=weakref.WeakKeyDictionary()
 
 def key(content,snapshot):

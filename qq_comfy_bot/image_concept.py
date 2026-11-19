@@ -6,12 +6,25 @@ import re
 FIELDS=('concept','narrative_moment','subject','action','expression','gesture','props','environment','atmosphere',
         'focal_point','emotional_intent','context_connection','creative_reason')
 
+ART_FIELDS=('pose_geometry','camera_relationship','lighting','color_palette','material_details',
+            'facial_micro_expression','foreground_background','visual_focus')
+
+
+def art_direction(value):
+    if not isinstance(value,dict):return {}
+    return {key:value[key].strip() for key in ART_FIELDS
+            if isinstance(value.get(key),str) and 0<len(value[key].strip())<=240
+            and not re.search(r'[\u4e00-\u9fff]',value[key])}
+
 
 def validate(value):
     if not isinstance(value,dict):return {}
     if any(not isinstance(value.get(k),str) or not value[k].strip() or len(value[k])>1000 for k in FIELDS):return {}
     if any(re.search(r'[\u4e00-\u9fff]',value[k]) for k in ('subject','action','expression','gesture','props','environment','atmosphere','focal_point')):return {}
-    return {k:value[k].strip() for k in FIELDS}
+    result={k:value[k].strip() for k in FIELDS}
+    direction=art_direction(value.get('art_direction'))
+    if direction:result['art_direction']=direction
+    return result
 
 
 def needs_plan(data):
@@ -42,7 +55,12 @@ def instruction():
         'subject/action/expression/gesture/props/environment/atmosphere/focal_point用英文视觉描述，无道具写no additional props。'
         '用户明确的动作、衣服、地点、视角优先，当前角色身份/发型/服装/地点保持连续，时间以当前时钟为准。'
         'Life来自角色已建立的活动，Comfort/Comic可以想象但不改生活状态，不把用户经历搬到角色身上。'
-        'creative_brief不选择camera/景别/画幅，后续本地shot_director负责怎么看。'
+        '在同一个 creative_brief 对象内附可选 art_direction 对象：'+','.join(ART_FIELDS)+'。各项最多160个英文字符；只写具体可见内容，缺项可省。'
+        'pose_geometry 描述重心与动作瞬间；camera_relationship 描述机位与主体关系；lighting 写明主光方向、反光和阴影且与画中时段相容；'
+        'color_palette 与 material_details 描述协调的颜色和材质；其余字段描述微表情、前后景和画面焦点。不要改身份、服装、场景或用户指定的镜头。'
+        '日常人物图默认让人物是第一视觉焦点。environment 只写地点和最能认出它的线索，例如走廊门框或跑道标线；次要物件合成大色块。'
+        'foreground_background 只描述已有物件的空间关系，不补无关家具、摆件或其他人物。用户明确要求环境细节时，按要求完整描述。'
+        '后续 shot_director 决定最终景别和画幅；不要在 camera_relationship 中重复景别或画幅。'
         '再输出visual_scene五字段作为固定身份/衣服/地点词汇和动作描述；不要输出推理过程。')
 
 

@@ -12,7 +12,13 @@ class InputLedger:
         with self.connection() as db:
             db.execute('CREATE TABLE IF NOT EXISTS inputs (id TEXT PRIMARY KEY, scope TEXT, payload TEXT, status TEXT, reason TEXT, updated REAL)')
             db.execute("UPDATE inputs SET status='outcome_unknown', reason='PROCESS_INTERRUPTED' WHERE status IN ('queued','processing')")
+            db.execute('CREATE TABLE IF NOT EXISTS revisions (scope TEXT PRIMARY KEY, version INTEGER NOT NULL)')
             db.commit()
+
+    def next_version(self, scope):
+        with self.connection() as db:
+            db.execute('INSERT INTO revisions VALUES (?,1) ON CONFLICT(scope) DO UPDATE SET version=version+1', (scope,))
+            return db.execute('SELECT version FROM revisions WHERE scope=?', (scope,)).fetchone()[0]
 
     def receive(self, scope, event, text):
         message_id = event.get('message_id')

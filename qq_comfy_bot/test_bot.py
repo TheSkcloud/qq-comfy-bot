@@ -29,6 +29,12 @@ def workflow_info(workflow):
             if isinstance(spec[0], list) and name in previous:
                 spec[0] = list(dict.fromkeys(previous[name][0] + spec[0]))
         info[node['type']] = {'input': {'required': required}}
+    info.setdefault('UpscaleModelLoader',{'input':{'required':{'model_name':[['4x-UltraSharp.pth']]}}})
+    info.setdefault('TulutHandDetailer',{'input':{'required':{
+        'image':['IMAGE'], 'model':['MODEL'], 'clip':['CLIP'], 'vae':['VAE'],
+        'upscale_model':['UPSCALE_MODEL'], 'lllite_name':[['none']], 'prompt':['STRING'],
+        'neg_prompt':['STRING'], 'guide_size':['INT'], 'steps':['INT'],
+        'cfg':['FLOAT'], 'denoise':['FLOAT'], 'character_index':['INT'], 'seed':['INT']}}})
     return info
 
 

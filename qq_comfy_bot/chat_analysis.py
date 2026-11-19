@@ -32,6 +32,8 @@ def route(text, discussion=None, history=()):
         return True, 'relationship_reasoning'
     if re.search(r'你还记得|我们上次|刚才.*(?:为什么|意思|说)|那天.*(?:说|事)|之前.*(?:矛盾|不是)', text):
         return True, 'historical_reference'
+    if history and re.search(r'上次(?:那|提)|之前(?:那件|那款|那首)|你说的那个|我指的是|刚才提到的', text):
+        return True, 'referent_in_history'
     if discussion and discussion.get('open_questions') and re.search(r'为什么|所以|但是|接着|继续', text):
         return True, 'unresolved_discussion'
     if history and re.search(r'^(?:所以|但是|那么|这|那|他|她|它).*(?:为什么|怎么|吗|呢|意思|矛盾)|不尽人意|和解|反过来',text):

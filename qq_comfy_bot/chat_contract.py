@@ -38,9 +38,24 @@ TEXT_METADATA = """memory_updates 为数组，没有就填 []。最多四条 {ki
 VISUAL_CONSTRAINTS = """只在绘图规划时处理本轮画面约束。用户明确指定临时人物、服装或场景时，在 visual_scene 的 identity/outfit/setting 写出完整英文标签，并在 visual_overrides:{identity,outfit,setting} 的对应键写本轮原话证据；没要求的项省略。一次性画面设定不要写进长期角色状态。用户排除的可见物件用 visual_exclusions:[{tag:简短英文物件名,evidence:本轮原话}]，并从正向描述去掉。动作和服装使用简明、可见的英文短语，勿写问题、回复或生成指令。"""
 
 
+TURN_CONTRACT = '每个segments元素就是一条可独立发送的QQ消息。用户在分批分享文章时只接住当前最值得回应的一点，不按段逐项评述，不替对方总结整篇；需要展开时用独立消息段，不用一个长气泡装几段。通常只回一句，笑一下、共情或直接作答都可以。倾诉时先听，用户求助时直接答。有独立的新意思才追加下一条，不用固定的解释、建议或追问收尾。可给与segments逐条对应的segment_types，枚举为reaction/acknowledgement/answer/followup/question/advice/closing。'
+
 def system(profile='full',force_image=False):
     if not force_image:
-        if profile=='front':return TEXT_REPLY
-        if profile=='text':return TEXT_REPLY+'\n'+TEXT_METADATA
-        if profile=='compact':return SYSTEM_COMPACT
-    return SYSTEM
+        if profile=='front':return TEXT_REPLY+'\n'+TURN_CONTRACT
+        if profile=='text':return TEXT_REPLY+'\n'+TEXT_METADATA+'\n'+TURN_CONTRACT
+        if profile=='compact':return SYSTEM_COMPACT+'\n'+TURN_CONTRACT
+    return SYSTEM+'\n'+TURN_CONTRACT
+
+
+def compose_turn(base, clock, state, context, visual, speech, direction):
+    import json
+    parts = [base, clock, '当前设定（JSON数据）：'+json.dumps(state, ensure_ascii=False)]
+    if context:
+        parts.append('<本轮背景，仅供相关时使用>\n'+context+'\n</本轮背景>')
+    if visual:
+        parts.append('本次明确要求生成图片，务必提供完整英文 visual_tags 和 waiting_lines。\n这是用户明确的视觉请求，也可能承接上一轮的动作/海报等话题。不要求用户再说一次拍照或画图，不把提供插画推迟到某天整理；以当前角色、服装和地点呈现想看的画面，不声称持有真实照片或官方海报。\n历史assistant消息为了节省上下文只保留reply，不是本轮输出模板。本轮必须另给send_image:true、完整visual_tags和完整visual_scene五字段，不能只给reply。')
+    parts.append('<本轮聊天表达，适用于reply字段>\n'+speech+'\n</本轮聊天表达>')
+    if direction:
+        parts.append('<本轮回应规划>\n'+direction+'\n</本轮回应规划>')
+    return '\n'.join(parts)

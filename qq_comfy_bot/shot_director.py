@@ -67,22 +67,38 @@ def _expectations(plan):
                 required_checks=['visible identity conflicts','visible outfit','planned subject/action','setting/time','visible anatomy'])
 
 
+SCENERY_REQUEST=re.compile(
+    r'风景|景色|环境为主|背景为主|背景.{0,8}(?:细节|丰富|复杂)|(?:保留|画出|看清|拍出).{0,8}背景|'
+    r'全景|(?:detailed|busy|intricate) (?:background|scenery)|(?:background|environment) in focus|scenery shot',re.I)
+
+
 def choose(snapshot, request='', history=()):
     """Score suitable shots against the last twelve actual/planned compositions."""
     style=snapshot.get('style','life')
     activity=' '.join(str(snapshot.get(k,'')) for k in ('action','props','location','activity')).lower()
     creative=snapshot.get('creative_brief',{})
-    activity+=' '+str(creative.get('narrative_moment',''))+' '+str(creative.get('focal_point',''))
+    from image_concept import art_direction
+    direction=art_direction(creative.get('art_direction'))
+    focus=' '.join((creative.get('focal_point',''),direction.get('visual_focus',''))).lower()
+    activity+=' '+str(creative.get('narrative_moment',''))+' '+focus+' '+direction.get('pose_geometry','').lower()
     locked=classify(request)
     avatar=snapshot.get('purpose')=='avatar'
     fixed=bool(re.search(r'固定镜头|同一.{0,3}(?:角度|镜头)|保持.{0,3}(?:角度|构图)|fixed (?:camera|shot)',request,re.I))
     if avatar:locked.update(size='close',direction='front',composition='centered')
+    if re.search(r'自拍|\bselfie\b',request,re.I):
+        locked.setdefault('direction','front')
+    simplified=bool(re.search(r'背景.{0,8}(?:简单|干净|简洁|虚化|不要.{0,4}(?:复杂|杂乱))|'
+                              r'(?:simple|clean|uncluttered|blurred) background',request,re.I))
+    scenery_requested=bool((not simplified and SCENERY_REQUEST.search(request))
+                           or locked.get('size') in ('wide','extreme_wide')
+                           or locked.get('composition') in ('foreground','frame'))
+    simple_background=style=='life' and not scenery_requested and snapshot.get('purpose')!='poster'
     suitable=[s for s in SHOTS if style in s['styles'] and (not s['activities'] or any(w in activity for w in s['activities']))]
     if snapshot.get('purpose')=='poster' and 'size' not in locked:
         suitable=[s for s in suitable if s['size'] in ('full','medium','close')]
     # Hard action visibility constraints precede diversity scoring. User camera locks win.
     if 'size' not in locked and not avatar and not fixed:
-        action=snapshot.get('action','')+' '+creative.get('focal_point','')
+        action=' '.join((snapshot.get('action',''),direction.get('pose_geometry',''),focus))
         if re.search(r'\b(?:leg|legs|foot|feet|knee|kneeling|hemline|slipper|socks)\b',action,re.I):
             compatible=[s for s in suitable if s['size'] in ('full','wide','extreme_wide')]
             if compatible:suitable=compatible
@@ -97,7 +113,6 @@ def choose(snapshot, request='', history=()):
     def score(shot):
         points=sum(100 for k,v in locked.items() if shot[k]==v)
         points+=3 if shot['activities'] and any(w in activity for w in shot['activities']) else 0
-        focus=str(creative.get('focal_point','')).lower()
         fine_action=bool(re.search(r'fingertip|page corner|pen tip|paper edge|handwriting|grip',focus))
         face_focus=bool(re.search(r'face|gaze|eyes|expression|glanc|smirk|smile|eyebrow|chin',focus))
         hand_focus=bool(re.search(r'hand|finger',focus)) and (fine_action or not face_focus)
@@ -106,7 +121,14 @@ def choose(snapshot, request='', history=()):
         if face_focus and not fine_action and shot['size']=='detail':points-=8
         if face_focus and shot['direction'] not in ('back','over_shoulder') and shot['size'] in ('close','extreme_close'):points+=6
         if re.search(r'entire room|environment|window light',focus) and shot['size'] in ('wide','extreme_wide'):points+=4
-        if re.search(r'dance|balance|body motion|skirt movement',focus) and shot['size']=='full':points+=5
+        if re.search(r'dance|balance|body motion|skirt movement|mid.stride|footfall|weight shift|running',
+                     focus+' '+snapshot.get('action','')+' '+direction.get('pose_geometry',''),re.I) and shot['size']=='full':
+            points+=12
+        if simple_background and not fixed:
+            if shot['size'] in ('wide','extreme_wide'):points-=18
+            if shot['composition']=='foreground':points-=4
+            if shot['size'] in ('medium','close'):points+=5
+            if shot['size']=='detail' and not fine_action:points-=9
         if style=='comfort' and shot['size'] in ('medium','close'):points+=4
         if style=='comic' and shot['stylization']!='natural':points+=4
         for index, item in enumerate(reversed(recent)):
@@ -120,9 +142,10 @@ def choose(snapshot, request='', history=()):
     selected.update(locked)
     selected.pop('activities');selected.pop('styles')
     selected['user_locked']=locked
+    selected['simple_background']=simple_background
     selected['reason']='user camera constraints' if locked or fixed or avatar else 'activity/style suitability, then recent twelve compositions'
     if avoid_failed_hands:selected.update(avoided_recent_hand_failure=True,reason='avoid recent hand anatomy failure; retain user camera overrides')
-    if creative:selected['creative_focal_point']=creative.get('focal_point','')
+    if creative:selected['creative_focal_point']=direction.get('visual_focus') or creative.get('focal_point','')
     # A lock is a complete override; do not retain contradictory template camera words.
     if locked:
         vocabulary={'size':{'extreme_wide':'extreme wide shot','wide':'wide shot','full':'full body shot','medium':'medium shot','close':'close up','extreme_close':'extreme close up','detail':'detail close up of hands and activity props, face outside frame'},

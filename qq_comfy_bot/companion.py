@@ -138,3 +138,24 @@ class Companion:
     def forget(self, user, name):
         with closing(sqlite3.connect(self.path)) as db, db:
             return db.execute('DELETE FROM anniversaries WHERE user=? AND name=?', (str(user), name)).rowcount
+
+
+def confirmed_style(session, input_id, source, current):
+    # A user-owned, explicit conversational preference can guide later related turns.
+    match = re.match(r'^(?:我(?:现在|只是|只)?想(?:吐槽|说说|让你听)|(?:请)?(?:别|不要|不用)(?:一直|总)?(?:追问|给我建议|教育我))',source.strip())
+    if not match:
+        return
+    key = character_key(session['state']['character'])
+    session.setdefault('interaction_preferences', {})[key] = {
+        'id':input_id, 'evidence':match.group(0), 'at':current.isoformat()}
+
+
+def expression_hint(session, text, current):
+    item = session.get('interaction_preferences', {}).get(character_key(session['state']['character']))
+    if not item or not re.search(r'烦|难过|心痛|吐槽|糟心|委屈',text) or re.search(r'怎么办|建议|帮我',text):
+        return ''
+    try:
+        fresh = 0 <= (current-datetime.fromisoformat(item['at'])).total_seconds() < 7*86400
+    except (ValueError,KeyError,TypeError):
+        return ''
+    return '上次交流中对方明确希望倾听；这轮先回应感受。' if fresh else ''

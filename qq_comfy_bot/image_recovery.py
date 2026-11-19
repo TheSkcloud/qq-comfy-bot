@@ -1,4 +1,5 @@
 """Reconcile original prompt IDs after restart. Never submit or send here."""
+from workflow_validation import output_images
 import asyncio
 import json
 import re
@@ -52,7 +53,7 @@ async def reconcile(http,url,root,started_at,ttl=600):
                     status=entry.get('status',{})
                     if status.get('status_str')=='error':
                         record('failed','reconciled_gpu_error');continue
-                    images=entry.get('outputs',{}).get('9',{}).get('images',[])
+                    images=output_images(entry, data.get('graph'))
                     if images:
                         output=images[0]
                         if not isinstance(output,dict) or not isinstance(output.get('filename'),str):raise ValueError('Invalid output')

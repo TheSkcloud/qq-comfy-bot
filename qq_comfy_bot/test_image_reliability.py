@@ -168,7 +168,7 @@ class ShotTests(unittest.TestCase):
 
     def test_actual_camera_history_overrides_planned_camera(self):
         a=shots.choose(self.snapshot)
-        actual=dict(size='extreme_wide',elevation='eye_level',direction='three_quarter',composition='frame')
+        actual={field:a[field] for field in ('size','elevation','direction','composition')}
         b=shots.choose(self.snapshot,'',[{'plan':{'id':'other'},'actual':actual}]*12)
         self.assertNotEqual(a['id'],b['id'])
 

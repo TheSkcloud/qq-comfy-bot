@@ -12,7 +12,9 @@ ROUTINE_LOOKS = (
     (('咖啡馆',), '咖啡馆', 'quiet cafe, window seat', 'casual cardigan, plain shirt', 'holding a cup near the window', 'cup'),
     (('做饭','早餐','午饭','晚饭','吃饭'), '家里的餐桌', 'home dining table, chairs', 'casual home shirt', 'sitting at the table', ''),
     (('学习','读书','看书','工作','笔记'), '家里的书桌旁', 'home room, desk by window', 'casual cardigan, plain shirt', 'reading an open book', 'open book'),
-    (('运动','练习'), '家里的空地', 'home room, open floor', 'simple athletic top, loose trousers', 'stretching one arm', ''),
+    (('跑步','慢跑'), '附近步道', 'outdoor path', 'simple athletic top, running shorts', 'mid-stride with her lead foot just touching down as her arms swing', ''),
+    (('拉伸','伸展'), '家里的空地', 'home room, open floor', 'simple athletic top, loose trousers', 'shifting her weight into a gentle side stretch, one elbow arcing above her shoulder', ''),
+    (('运动','练习'), '家里的空地', 'home room, open floor', 'simple athletic top, loose trousers', 'steadying her balance after a movement, shoulders relaxing as she exhales', ''),
     (('睡觉','睡前','休息','洗漱'), '家里的房间', 'quiet home room, armchair', 'simple lounge clothes', 'sitting quietly in a chair', ''),
 )
 DEFAULT_LOOK = ('家里的房间', 'quiet home room, window', 'comfortable home clothes', 'pausing by the window', '')
@@ -41,13 +43,20 @@ def local_plan(session, activity, defaults):
         saved=cache.get('setting',{})
         if saved.get('source')!=normalize(state['location']) or not usable_tags(saved.get('tags')):return None
         setting=saved['tags']
-        action,props='pausing in place',''
+        if re.search(r'拉伸|伸展|运动|练习',activity) and re.search(r'\b(?:home|room|floor)\b',setting,re.I):
+            action,props='settling her balance at the end of a stretch, shoulders relaxing as she exhales',''
+        elif re.search(r'\b(?:desk|table)\b',setting,re.I):
+            action,props='resting one forearm on the tabletop and shifting her weight forward',''
+        else:
+            action,props='turning slightly as she settles into a relaxed stance',''
         labels.pop('location')
-    brief=dict(identity=identity,outfit=outfit,setting=setting,action=action,composition='medium shot')
+    brief=dict(identity=identity,outfit=outfit,setting=setting,action=action,composition='candid framing centered on the activity')
     creative=dict(concept='日常随手照',narrative_moment=activity or '在当前地点稍作停留',subject=identity,
         action=action,expression='relaxed expression',gesture=action,props=props or 'no additional props',
         environment=setting,atmosphere='quiet atmosphere',focal_point=action,emotional_intent='日常记录',
-        context_connection='当前虚拟日程与已保存的角色设定',creative_reason='当前活动中的一个自然停顿')
+        context_connection='当前虚拟日程与已保存的角色设定',creative_reason='当前活动中的一个自然停顿',
+        art_direction={'visual_focus':action,
+                       'material_details':'subtle fabric folds following the movement of her shoulders'})
     return dict(state=dict(state),visual_scene=brief,visual_tags=', '.join(brief.values()),creative_brief=creative,
                 image_plan={'kind':'life','action':action,'props':props,'mood':'relaxed expression'},send_image=True,
                 _local_visual=True,_local_scene_labels=labels)

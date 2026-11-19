@@ -42,7 +42,8 @@ def plan(message, history):
         mode='exit' if interaction_plan['joke_end'] else 'teasing'
     recent_questions = sum(question_count(reply) > 0 for reply in recent[-2:])
     # A follow-up is earned by context, not appended to keep every turn going.
-    questions = 1 if mode == 'chat' and len(recent) >= 3 and recent_questions == 0 and len(message) >= 12 else 0
+    opening = re.search(r'有个问题|没听懂|卡住|不知道选哪|猜猜|想不想知道|特别有意思的', message)
+    questions = int(mode == 'chat' and bool(opening) and recent_questions == 0)
     if mode == 'help':
         questions = 1  # Necessary clarification remains available.
     if NO_QUESTIONS.search(message):

@@ -38,8 +38,9 @@ class ObservedLanguageTests(unittest.TestCase):
 
     def test_planner_does_not_mistake_reported_question_for_direct_question(self):
         p=dialogue_planner.plan('老师说：“你听说过这本书吗？”')
-        self.assertEqual(p.primary_act,'React');self.assertTrue(p.quoted_or_narrative)
-        self.assertEqual(dialogue_planner.plan('为什么会这样？').primary_act,'Answer')
+        self.assertEqual(p.primary_act,'ListenToStory');self.assertTrue(p.quoted_or_narrative)
+        self.assertEqual(dialogue_planner.plan('为什么会这样？').primary_act,'Explain')
+        self.assertEqual(dialogue_planner.plan('你听说过这本书吗？').primary_act,'Answer')
 
 class CapabilityTests(unittest.TestCase):
     def test_mode_origin_matrix(self):

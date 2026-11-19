@@ -28,7 +28,7 @@ class RecipeTests(unittest.IsolatedAsyncioTestCase):
             profile=workflow.prepare(ROOT,{**self.snapshot,'art_style':style})
             graph=await workflow.apply(None,'',self.graph,profile)
             self.assertEqual(graph['66']['inputs']['unet_name'],'miaomiaoHarem_29BBETA10.safetensors')
-            self.assertEqual(graph['70']['inputs']['cfg'],1.6)
+            self.assertEqual(graph['70']['inputs']['cfg'],1.0 if style=='handdrawn' else 1.6)
             self.assertEqual(graph['70']['inputs']['steps'],30)
             self.assertEqual(graph['70']['inputs']['denoise'],.9)
             self.assertEqual(graph['70']['inputs']['sampler_name'],'euler')

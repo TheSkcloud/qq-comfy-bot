@@ -22,6 +22,7 @@ class Ticket:
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     packets: int = 0
     in_flight: bool = False
+    allow_finish: bool = False
     pace: str = "normal"
     collection_ms: float = 0
     message_count: int = 1
@@ -40,16 +41,19 @@ class ReplyScheduler:
         self.timing = timing_config()
         self.send_locks = {}
 
-    def begin(self, key, read_length):
+    def begin(self, key, read_length, interrupt=True, version=None):
         old = self.current.get(key)
         if old:
-            old.cancelled.set()
-        ticket = Ticket(key, old.version+1 if old else 1, read_length)
+            if interrupt:
+                old.cancelled.set()
+            else:
+                old.allow_finish = True
+        ticket = Ticket(key, version or (old.version+1 if old else 1), read_length)
         self.current[key] = ticket
         return ticket
 
     def check(self, ticket):
-        if ticket and (ticket.cancelled.is_set() or self.current.get(ticket.key) is not ticket):
+        if ticket and (ticket.cancelled.is_set() or (not ticket.allow_finish and self.current.get(ticket.key) is not ticket)):
             raise Superseded()
 
     async def run(self, ticket, coroutine):
@@ -94,7 +98,7 @@ class ReplyScheduler:
             if reply_length<=12:typing=min(typing,.9)
         if fast:typing=min(typing,1.2)
         if segment:
-            typing=min(cfg['segment_max'],max(.25,typing*.65))+random.uniform(cfg['segment_gap_min'],cfg['segment_gap_max'])
+            typing=min(cfg['segment_max'],max(.25,typing*.65))
         reading_wait=0 if segment else max(0,reading-(time.monotonic()-ticket.started))
         typing*=random.uniform(1-cfg['jitter'],1+cfg['jitter'])
         ticket.reading_ms+=reading_wait*1000
@@ -106,11 +110,10 @@ class ReplyScheduler:
 
 
 def timing_config(values=None):
-    cfg={'characters_per_second':7.,'typing_min':.65,'typing_max':14.,'reading_max':7.,'jitter':.15,'collection_min':.35,'collection_max':.85,'segment_max':5.,'segment_gap_min':.35,'segment_gap_max':1.1}
+    cfg={'characters_per_second':7.,'typing_min':.65,'typing_max':14.,'reading_max':7.,'jitter':.15,'segment_max':5.}
     for key,value in (values or {}).items():
         if key in cfg:
             number=float(value)
-            low,high={'characters_per_second':(3,30),'typing_min':(.1,2),'typing_max':(2,20),'reading_max':(0,12),'jitter':(0,.3),'collection_min':(.1,1),'collection_max':(.2,1.5),'segment_max':(1,10),'segment_gap_min':(.1,2),'segment_gap_max':(.2,3)}[key]
+            low,high={'characters_per_second':(3,30),'typing_min':(.1,2),'typing_max':(2,20),'reading_max':(0,12),'jitter':(0,.3),'segment_max':(1,10)}[key]
             cfg[key]=max(low,min(high,number))
-    cfg['collection_max']=max(cfg['collection_max'],cfg['collection_min'])
     return cfg

@@ -92,3 +92,85 @@ class CompilerTests(unittest.IsolatedAsyncioTestCase):
         b['gesture']='turning her head toward the viewer'
         d={'creative_brief':b,'visual_scene':{}}
         concept.apply(d);self.assertIn('turning her head',d['visual_scene']['action'])
+
+
+    def test_preserves_designed_light_camera_material_and_reference_style(self):
+        s=scene()
+        s.update(art_style='handdrawn', outfit_tags='pale blue dress, long blue-purple hair loose')
+        s['creative_brief']={'atmosphere':'soft reflected light on skin',
+            'art_direction':{'lighting':'warm window rim lighting, cool bounce light',
+                'material_details':'matte folds in the dress fabric',
+                'camera_relationship':'view across the corner of the tabletop'}}
+        s['shot_plan']=copy.deepcopy(next(shot for shot in shots.SHOTS if shot['id']=='table_level'))
+        text=p.build(s).positive()
+        for detail in ('@92m','masterpiece','soft reflected light on skin','warm window rim lighting',
+                       'cool bounce light','matte folds in the dress fabric','tabletop height',
+                       'foreground activity props','view across the corner'):
+            self.assertIn(detail,text)
+        self.assertEqual(p.build(s).outfit,'pale blue dress')
+
+    def test_night_and_user_camera_lock_take_precedence(self):
+        s=scene()
+        s.update(local_time='2026-11-07T22:00:00+08:00',
+                 setting_tags='home room, desk by the window, direct sunlight')
+        s['creative_brief']={'art_direction':{'lighting':'bright sunlight, warm reflected lamplight',
+                          'camera_relationship':'high angle looking down from the ceiling',
+                          'pose_geometry':'one hand resting on her knee'}}
+        s['shot_plan']=shots.choose(s,'面部近景')
+        text=p.build(s).positive()
+        self.assertIn('warm reflected lamplight',text)
+        self.assertIn('desk by the window',text)
+        for contradiction in ('bright sunlight','direct sunlight','looking down from the ceiling','her knee'):
+            self.assertNotIn(contradiction,text)
+
+    def test_art_direction_is_optional_and_preserved_by_existing_planner(self):
+        from test_planning_fixture import creative
+        brief=creative()
+        self.assertTrue(concept.validate(brief))
+        brief['art_direction']={'lighting':'warm sidelight', 'visual_focus':['not text'], 'unknown':'ignored'}
+        data={'creative_brief':brief}
+        self.assertTrue(concept.apply(data))
+        self.assertEqual(data['creative_brief']['art_direction'],{'lighting':'warm sidelight'})
+
+    async def test_blank_borders_block_even_without_external_review(self):
+        import io
+        from PIL import Image
+        import image_director
+        image=Image.new('RGB',(400,600),(196,196,203))
+        image.paste('darkblue',(0,220,200,380))
+        image.paste('darkgoldenrod',(200,220,400,380))
+        buffer=io.BytesIO()
+        image.save(buffer,format='PNG')
+        result=await image_director.inspect_image(None,buffer.getvalue(),{},'.',{'qa_enabled':False})
+        self.assertFalse(result['pass'])
+        self.assertEqual(result['status'],'excessive_blank_borders')
+
+
+    def test_clean_background_keeps_location_action_and_light(self):
+        s=scene()
+        s.update(setting_tags='home room, desk by window, crowded shelves, wall decorations',
+                 creative_brief={'art_direction':{'lighting':'warm reflected window light',
+                     'foreground_background':'vases on shelves filling the foreground'}})
+        s['shot_plan']=shots.choose(s)
+        self.assertIn(s['shot_plan']['size'],('medium','close'))
+        spec=p.build(s)
+        text=spec.positive()
+        for term in ('home room','desk by window','holding a pen','warm reflected window light','simple background'):
+            self.assertIn(term,text)
+        for term in ('crowded shelves','wall decorations','vases','scnr'):
+            self.assertNotIn(term,text)
+        self.assertIn('background clutter',spec.negative(''))
+        self.assertLess(text.index('best quality'),text.index('suzuki hana'))
+        self.assertLess(text.index('suzuki hana'),text.index('@ningen'))
+        self.assertLess(text.index('@ningen'),text.index('desk by window'))
+
+    def test_explicit_scenery_can_keep_background_details(self):
+        s=scene()
+        s['setting_tags']='home room, desk by window, oak bookshelves, patterned wallpaper'
+        s['shot_plan']=shots.choose(s,'用远景，背景细节丰富')
+        self.assertEqual(s['shot_plan']['size'],'wide')
+        spec=p.build(s)
+        self.assertIn('patterned wallpaper',spec.positive())
+        self.assertNotIn('background clutter',spec.negative(''))
+        s['shot_plan']=shots.choose(s,'半身，背景不要太复杂')
+        self.assertTrue(s['shot_plan']['simple_background'])

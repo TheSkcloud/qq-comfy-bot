@@ -107,6 +107,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.instance=bot.Bot(None);self.instance.connected.set()
         # Transport tests exercise admission success; probability gates have their own tests.
         self.transport_preferences=bot.preferences.load()
+        self.transport_preferences['turn_taking'] = bot.turn_taking.config({'natural_pause': {'enabled': False},
+            'input_collector': {'quiet_window_ms': 30, 'max_wait_ms': 100}})
         self.transport_preferences['drawing'].update(initiative=1,comfort=1,comic=1)
         self.preferences_patch=patch.object(bot.preferences,'load',side_effect=lambda:copy.deepcopy(self.transport_preferences))
         self.preferences_patch.start();self.addCleanup(self.preferences_patch.stop)

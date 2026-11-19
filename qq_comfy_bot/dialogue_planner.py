@@ -24,11 +24,43 @@ class DialoguePlan:
                 '不添加用户未说过的人格、经历或因果。没有必要就不追问，也不用每轮造笑点。')
 
 
-def plan(text, history=(), discussion=None):
-    discussion=discussion or {}
-    narrative=bool(re.search(r'[“”「」]|那天|那次|当时|后来|曾经|前段时间|我写|随笔|第.{0,3}集|本作',text))
-    emotion=bool(re.search(r'难过|失望|低分|不公平|担心|委屈|没法原谅|心情',text))
-    question=bool(re.search(r'[？?]$|怎么办|为什么|请解释|请分析',text.strip())) and not narrative
-    act='Empathize' if emotion else 'Answer' if question else 'React'
-    depth='extended' if re.search(r'详细|深入|推导|分情况|比较',text) else 'normal' if len(text)>120 else 'short'
-    return DialoguePlan(act,None,'reserved_respectful',depth,depth,None,bool(history),narrative)
+def plan(text, history=(), discussion=None, *, relation=None, tone='reserved_respectful', confirmed_boundary=False):
+    import speech
+    from memory_recall import terms
+    discussion = discussion or {}
+    spoken = re.sub(r'[“「].*?[”」]', '', text, flags=re.S).strip()
+    narrative = spoken != text.strip() or bool(re.search(r'那天|那次|当时|后来|我写|本作|我问他|我问她|他跟我说|她跟我说', text))
+    policy = speech.plan(spoken, history)
+    mode = policy['mode']
+    goal = None
+    if confirmed_boundary and re.search(r'不想聊|到此为止|别追问', spoken):
+        act = 'Close'
+    elif mode == 'exit':
+        act = 'Close'
+    elif mode == 'ack':
+        act = 'Acknowledge' if not history else 'AllowSilence'
+    elif re.search(r'你怎么看|你觉得呢|你同意吗|你的看法', spoken):
+        act = 'TakePosition'
+    elif mode == 'help' or re.search(r'(?:请解释|详细讲|为什么)', spoken):
+        act = 'Explain'
+    elif spoken.endswith(('？','?')) or re.search(r'听说过|知道.{1,18}吗', spoken):
+        act = 'Answer'
+    elif mode == 'vent':
+        act = 'Listen'
+    elif policy['questions'] and re.search(r'没听懂|有个问题|卡住|不知道选哪',spoken):
+        act, goal = 'Clarify', '问清卡住的环节'
+    elif mode == 'teasing' or re.search(r'笑死|糗事|社死|离谱',spoken):
+        act = 'PlayAlong'
+    elif narrative:
+        act = 'ListenToStory'
+    else:
+        act = 'React'
+    previous = next((m.get('content','') for m in reversed(history) if m.get('role')=='user'), '')
+    follow = bool(previous and (terms(previous) & terms(spoken) or re.match(r'所以|但是|接着|还有|那我|你刚才',spoken)))
+    if relation in ('switch','side') or re.search(r'换个话题|说点别的',spoken):
+        follow = False
+    elif relation == 'resume':
+        follow = True
+    length = 'extended' if re.search(r'详细|深入|推导|分情况|比较', spoken) else 'minimal' if act in ('Close','Acknowledge','AllowSilence','PlayAlong') else 'short'
+    secondary = 'Example' if act=='Explain' and re.search(r'例子|举例',spoken) else None
+    return DialoguePlan(act, secondary, tone, length, length, goal, follow, narrative)

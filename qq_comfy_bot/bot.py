@@ -2,6 +2,9 @@
 import argparse
 import hashlib
 import contextvars
+import memory_recall
+import turn_taking
+from workflow_validation import output_images
 import asyncio
 import base64
 import copy
@@ -48,6 +51,7 @@ from gpu_memory_manager import GPUManager
 from image_errors import ImageFailure
 from reply_scheduler import ReplyScheduler, CURRENT, Superseded
 from companion import character_key, conversation_direction
+import visual_selector
 from visual_brief import apply_request_options, assemble, cache_context, complete_from_cache, local_plan, simple_photo, validate_brief
 from workflow_validation import validate_graph
 from image_policy import image_requested, visual_request_context, picture_count, allow_spontaneous, scene_tags
@@ -302,7 +306,7 @@ class Comfy:
                         receipt['status']='gpu_error'
                         receipt_path.write_text(json.dumps(receipt,ensure_ascii=False,indent=2),encoding='utf-8')
                         raise ImageFailure('gpu_execution_failed','gpu','ComfyUI 执行失败：'+json.dumps(status.get('messages'),ensure_ascii=False)[:1600])
-                    images = entry.get('outputs', {}).get('9', {}).get('images', [])
+                    images = output_images(entry, receipt.get('graph'))
                     if images:
                         stamps=[m[1].get('timestamp',0)/1000 for m in status.get('messages',[]) if isinstance(m,list) and len(m)>1 and m[0]=='execution_success' and isinstance(m[1],dict)]
                         end=max(stamps,default=0)
@@ -346,13 +350,8 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
     persona_path=Path(__file__).with_name('persona.md')
     if persona_path.exists():system_base+='\n'+persona_text(persona_path)
     system_base+='\n'+conversation_direction(user,history)
-    system=system_base
-    system += '\n' + dialogue.clock_context(current, history)
-    system += '\n当前设定（JSON数据）：' + json.dumps(state, ensure_ascii=False)
-    if force_image:
-        system += '\n本次明确要求生成图片，务必提供完整英文 visual_tags。'
     body = dict(model=os.getenv('DEEPSEEK_MODEL', 'deepseek-flash'),
-                messages=[{'role': 'system', 'content': system}] + dialogue.api_history(history,assistant_json=True) +
+                messages=[{'role': 'system', 'content': system_base}] + dialogue.api_history(history,assistant_json=True) +
                          [{'role': 'user', 'content': user}],
                 response_format={'type': 'json_object'}, max_tokens=1800)
     if media and media.get('blocks'):
@@ -370,17 +369,10 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
     attempts=2 if not front_only and os.getenv('CHAT_SCHEMA_RETRY','0')=='1' else 1
     for attempt in range(attempts):
         # Retry may take seconds: refresh clock facts for every actual API request.
-        body['messages'][0]['content'] = system_base + '\n' + dialogue.clock_context(now(), history)
-        body['messages'][0]['content'] += '\n当前设定（JSON数据）：' + json.dumps(state, ensure_ascii=False)
-        if context:
-            body['messages'][0]['content'] += '\n<本轮背景，仅供相关时使用>\n' + context + '\n</本轮背景>'
-        if force_image:
-            body['messages'][0]['content'] += '\n本次明确要求生成图片，务必提供完整英文 visual_tags 和 waiting_lines。'
-            body['messages'][0]['content'] += '\n这是用户明确的视觉请求，也可能承接上一轮的动作/海报等话题。不要求用户再说一次拍照或画图，不回复“想看就直说”、不把提供插画推迟到某天整理；以当前角色、服装和地点呈现想看的画面，不声称持有真实照片或官方海报。'
-            body['messages'][0]['content'] += '\n历史assistant消息为了节省上下文只保留reply，不是本轮输出模板。本轮必须另给send_image:true、完整visual_tags和完整visual_scene五字段，不能只给reply。'
-        body['messages'][0]['content'] += '\n<本轮聊天表达，适用于reply字段>\n'+speech.instruction(user, history)+'\n</本轮聊天表达>'
-        if not force_image:
-            body['messages'][0]['content']+='\n<本轮回应规划>\n'+dialogue_planner.plan(user,history,depth.get('state')).prompt()+'\n</本轮回应规划>'
+        direction = '' if force_image else (depth.get('reply_direction') or dialogue_planner.plan(user,history,depth.get('state')).prompt())
+        from chat_contract import compose_turn
+        body['messages'][0]['content'] = compose_turn(system_base, dialogue.clock_context(now(),history),
+            state, context, force_image, speech.instruction(user,history), direction)
         api_started=time.monotonic()
         async with http.post(url, json=body, headers={
                 'Authorization': 'Bearer ' + os.environ['DEEPSEEK_API_KEY']}) as r:
@@ -427,6 +419,7 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
                     if reply!=data['reply']:
                         data['reply']=reply
                         data['response_plan']={**data['response_plan'],'segments':[reply]}
+                        data['response_plan'].pop('segment_types', None)
                 else:
                     data=await repair_grounding(http,data,user,history,url,grounding_flags)
             if tone_guard.issues(data['reply']):
@@ -436,6 +429,7 @@ async def deepseek(http, state, history, user, force_image=False, context='', me
                 revised = await review_speech(http, data, user, history, body['messages'][0]['content'], url)
                 if revised['reply'] != data['reply']:
                     revised['response_plan'] = {**data['response_plan'],'segments':[revised['reply']]}
+                    revised['response_plan'].pop('segment_types', None)
                 return revised
             return data
         except (ValueError,KeyError,TypeError,AssertionError,IndexError) as exc:
@@ -495,11 +489,13 @@ async def repair_grounding(http,data,user,history,url,issues):
         if tone_guard.issues(reply):reply=tone_guard.fallback(reply)
         result['reply']=reply
         result['response_plan']={**result['response_plan'],'segments':[reply]}
+        result['response_plan'].pop('segment_types', None)
         result['_grounding_repair']['applied']=True
     except (aiohttp.ClientError,asyncio.TimeoutError,ValueError,KeyError,TypeError,IndexError):
         import social_reasoning
         result['reply']=tone_guard.fallback(social_reasoning.safe_grounded_reply(data['reply'],user,history))
         result['response_plan']={**result['response_plan'],'segments':[result['reply']]}
+        result['response_plan'].pop('segment_types', None)
         result['_grounding_repair']['fallback']=True
     result.setdefault('_stage_times',{})['grounding_repair_ms']=round((time.monotonic()-started)*1000)
     return result
@@ -564,6 +560,9 @@ class Bot:
         self.typing_users = set()
         self.inbox = {}
         self.inbox_workers = {}
+        self.input_changes = {}
+        self.active_input = {}
+        self.input_cadence = {}
         self.context = ContextEngine(ROOT)
         self.store.recover(self.context.life)
         self.scheduler = ReplyScheduler()
@@ -590,7 +589,7 @@ class Bot:
         except OSError:log.warning('后台时序指标未能保存')
 
     async def call(self, action, params, ws):
-        echo = str(uuid.uuid4())
+        echo = turn_taking.SEND_ECHO.get() or str(uuid.uuid4())
         fut = asyncio.get_running_loop().create_future()
         self.pending[echo] = fut
         try:
@@ -661,10 +660,13 @@ class Bot:
                 raise Superseded()
             if ticket:
                 ticket.in_flight=True
-            if on_dispatch:
-                on_dispatch()
             dispatch_started=time.monotonic()
+            echo_token = None
             try:
+                if on_dispatch:
+                    echo = on_dispatch()
+                    if isinstance(echo, str):
+                        echo_token = turn_taking.SEND_ECHO.set(echo)
                 acknowledgement=await self.call('send_group_msg' if group else 'send_private_msg',params,self.ws)
                 if not isinstance(acknowledgement,dict) or not acknowledgement.get('message_id'):
                     raise ImageFailure('qq_ack_missing' if image else 'qq_text_ack_missing','send','QQ accepted the request without a message identifier; do not resend')
@@ -673,6 +675,8 @@ class Bot:
                     self.delivery_metric('sent',ticket,kind='text' if text else 'image',collection_ms=ticket.collection_ms,reading_ms=round(ticket.reading_ms),model_ms=round(ticket.model_ms),typing_ms=round(ticket.typing_ms),send_delay_ms=round((time.monotonic()-send_ready_started)*1000),total_elapsed_ms=round((time.monotonic()-ticket.started)*1000),response_length=len(text or ''),message_count=ticket.message_count,reply_type=ticket.reply_type,segment_count=ticket.segment_count,cancelled=False,sent=True)
                 return acknowledgement
             finally:
+                if echo_token is not None:
+                    turn_taking.SEND_ECHO.reset(echo_token)
                 if ticket:
                     ticket.in_flight=False
 
@@ -768,7 +772,13 @@ class Bot:
             self.image_warmups=[warm];self.tasks.add(warm);warm.add_done_callback(self.tasks.discard)
         event={**event,'_queued_at':time.monotonic(),'_explicit_image_request':explicit_request}
         event['_input_fragments']=[{'id':event.get('_ledger_id') or uuid.uuid4().hex,'text':text,'at':now().isoformat()}]
-        self.scheduler.begin(key,len(text))
+        options = turn_taking.config(preferences.load().get('turn_taking'))
+        interrupt = text.startswith('/') or text in ('取消', '停止回复', '别回复了') or not options['enabled'] or options['interruption']['enabled']
+        if interrupt and key in self.active_input:
+            self.active_input[key].cancelled.set()
+        version = self.input_ledger.next_version(key)
+        self.scheduler.begin(key, len(text), interrupt=interrupt, version=version)
+        self.input_changes.setdefault(key, asyncio.Event()).set()
         if text in ('/取消','取消','停止回复','别回复了'):
             if getattr(self,'input_ledger',None):
                 for queued,_ in self.inbox.get(key,[]):
@@ -787,7 +797,12 @@ class Bot:
             if image_task and not image_task.done():
                 image_task.cancel()
         self.activity[key] = self.activity.get(key, 0) + 1
-        self.inbox.setdefault(key, []).append((event, text))
+        queue = self.inbox.setdefault(key, [])
+        if queue:
+            gap = event['_queued_at'] - queue[-1][0]['_queued_at']
+            if 0 < gap <= options['input_collector']['max_wait_ms'] / 1000:
+                self.input_cadence[key] = (gap + self.input_cadence.get(key, gap)) / 2
+        queue.append((event, text))
         existing = self.inbox_workers.get(key)
         if existing and not existing.done():
             return
@@ -800,17 +815,18 @@ class Bot:
         try:
             while self.inbox.get(key):
                 first = time.monotonic()
-                # Collect short successive messages, but do not wait indefinitely.
-                if not self.inbox[key][0][1].startswith('/') and not self.inbox[key][0][0].get('_explicit_image_request'):
+                options = turn_taking.config(preferences.load().get('turn_taking'))
+                collector = options['input_collector']
+                if options['enabled'] and collector['enabled']:
+                    changed = self.input_changes[key]
                     while True:
-                        size = len(self.inbox[key])
-                        timing=preferences.load().get('reply_timing',{})
-                        window=.35 if speech.plan(self.inbox[key][-1][1],[])['mode'] in ('ack','exit') else .65
-                        if size>=2:
-                            gap=self.inbox[key][-1][0].get('_queued_at',first)-self.inbox[key][-2][0].get('_queued_at',first)
-                            window=max(.35,min(.85,gap*1.4))
-                        await asyncio.sleep(max(timing.get('collection_min',.35),min(timing.get('collection_max',.85),window)))
-                        if len(self.inbox[key]) == size or time.monotonic()-first >= 2:
+                        changed.clear()
+                        delay = turn_taking.remaining_window(self.inbox[key], time.monotonic(), collector, self.input_cadence.get(key))
+                        if delay <= 0:
+                            break
+                        try:
+                            await asyncio.wait_for(changed.wait(), delay)
+                        except asyncio.TimeoutError:
                             break
                 pending = self.inbox[key]
                 event, text = pending.pop(0)
@@ -829,9 +845,10 @@ class Bot:
                 event['_input_fragments']=fragments
                 ticket=self.scheduler.current.get(key)
                 if ticket:
+                    ticket.input_batch_id = uuid.uuid4().hex
                     event['_input_batch_id']=ticket.input_batch_id
                     ticket.read_length=len(text)
-                    ticket.message_count=message_count
+                    ticket.message_count=len(fragments) or message_count
                     ticket.collection_ms=round((time.monotonic()-first)*1000)
                     self.scheduler.timing=__import__('reply_scheduler').timing_config(preferences.load().get('reply_timing'))
                 ticket.pace='fast' if speech.plan(text,[])['mode'] in ('ack','exit') or dialogue.time_question(text) or re.search(r'救命|急救|紧急',text) else ('complex' if speech.plan(text,[])['mode']=='help' else 'normal')
@@ -839,7 +856,11 @@ class Bot:
                 ledger = getattr(self, 'input_ledger', None)
                 if ledger:
                     for fragment in fragments: ledger.transition(fragment['id'], 'processing', 'REPLY_STARTED')
-                accepted = await self.handle(event,key,text,ticket=ticket)
+                self.active_input[key] = ticket
+                try:
+                    accepted = await self.handle(event,key,text,ticket=ticket)
+                finally:
+                    self.active_input.pop(key, None)
                 if ledger:
                     for fragment in fragments: ledger.transition(fragment['id'], event.get('_result_status','handled') if accepted else 'superseded', event.get('_result_reason','REPLY_HANDLED') if accepted else 'REPLY_SUPERSEDED')
                 if accepted is False and ticket and not ticket.packets and not text.startswith('/') and pending and not pending[0][1].startswith('/') and not re.search(r'^(?:取消|停止回复|别回复了)|换个?话题|先不聊这个|别说这个',pending[0][1]):
@@ -849,6 +870,7 @@ class Bot:
             self.inbox_workers.pop(key, None)
             if not self.inbox.get(key):
                 self.inbox.pop(key, None)
+                self.input_changes.pop(key, None)
 
     async def handle(self, event, key, text, ticket=None):
         self.activity[key]=self.activity.get(key,0)+1
@@ -952,7 +974,7 @@ class Bot:
         if command in ('/帮助', '/help', '/bot'):
             return await self.send(e, HELP)
         if command=='/画风':
-            if not arg:return await self.send(e,art_styles.menu(art_styles.selected(session)))
+            if not arg:return await self.send(e,art_styles.menu(art_styles.selected(session,"life")))
             try:style=art_styles.resolve(arg)
             except ValueError as exc:return await self.send(e,str(exc))
             session['art_style']=style
@@ -971,13 +993,13 @@ class Bot:
         if command=='/档案':
             if e.get('message_type')!='private':
                 return await self.send(e,'个人档案请在私聊里查看。')
-            facts=self.context.life.facts(str(e['user_id']))
+            facts=self.context.life.facts(memory_recall.owner(str(e['user_id']),session['state']['character']))
             return await self.send(e,'\n'.join(f"{x['kind']}：{x['value']}" for x in facts) or '还没有需要记下的基本信息。只记录你明确说过的内容。')
         if command=='/更正':
             if e.get('message_type')!='private' or ' => ' not in arg:
                 return await self.send(e,'请在私聊用 /更正 原条目 => 新条目，更正自己的档案。')
             old,new=arg.split(' => ',1)
-            changed=self.context.life.correct(str(e['user_id']),old.strip(),new.strip(),now())
+            changed=self.context.life.correct(memory_recall.owner(str(e['user_id']),session['state']['character']),old.strip(),new.strip(),now())
             if changed:
                 session['history']=[m for m in session['history'] if old.strip() not in m.get('content','')]
                 self.store.save(key,session)
@@ -1016,7 +1038,7 @@ class Bot:
             if command == '/忘记':
                 if not arg:
                     return await self.send(e, '先用 /档案 查看，再用 /忘记 完整条目内容 移除一项。')
-                count = self.context.life.forget(user, arg)
+                count = self.context.life.forget(memory_recall.owner(user,session['state']['character']), arg)
                 # Remove the forgotten phrase from short conversational context as well.
                 session['history'] = [m for m in session['history'] if arg not in m.get('content', '')]
                 self.store.save(key, session)
@@ -1063,7 +1085,7 @@ class Bot:
             return await self.send(e, '已恢复默认角色并清空聊天记忆。')
         if command == '/状态':
             s = session['state']
-            return await self.send(e, f'角色：{s["character"]}\n服装：{s["clothing"]}\n场景：{s["location"]}\n画风：{art_styles.describe(art_styles.selected(session))}\n现实时间：{now():%Y-%m-%d %H}时')
+            return await self.send(e, f'角色：{s["character"]}\n服装：{s["clothing"]}\n场景：{s["location"]}\n画风：{art_styles.describe(art_styles.selected(session,"life"))}\n现实时间：{now():%Y-%m-%d %H}时')
         changes = {'/角色': 'character', '/换装': 'clothing', '/地点': 'location'}
         if command in changes:
             if not arg:
@@ -1112,9 +1134,18 @@ class Bot:
         included={fragment['id'] for fragment in fragments}
         model_history=[copy.deepcopy(item) for item in session['history'] if item.get('id') not in included]
         input_id=e.get('_input_batch_id') or (CURRENT.get().input_batch_id if CURRENT.get() else uuid.uuid4().hex)
+        if e.get('message_type')=='private':
+            owner = memory_recall.owner(str(e['user_id']), session['state']['character'])
+            seen = {row.get('id') for row in session.get('received_inputs', [])}
+            for fragment in fragments or [{'id':input_id,'text':request}]:
+                if fragment['id'] not in seen:
+                    self.store.effect(self.context.life.capture_before_trim, owner, fragment['text'], now(), fragment['id'])
         if fragments:
             for fragment in fragments:delivery_state.receive(session,fragment['text'],datetime.fromisoformat(fragment['at']),fragment['id'])
         else:delivery_state.receive(session,request,now(),input_id)
+        session['last_input_emotion'] = {'input_id': input_id, 'emotion': social_reasoning.local_emotion(text, model_history),
+                                        'at': received_at}
+        session['input_emotions'] = (session.get('input_emotions', []) + [session['last_input_emotion']])[-40:]
         if e.get('_pending_image_job'):
             e['_pending_image_job'].data['input_batch_id']=input_id
             e['_pending_image_job'].save()
@@ -1130,7 +1161,7 @@ class Bot:
         split=not explicit and not has_media and self.http is not None and route_split
         self.delivery_metric('semantic_route',CURRENT.get(),route='dual' if split else 'single',reason=route_reason)
         try:
-            extra=await asyncio.wait_for(self.context.build(self.http,str(e['user_id']),text,now(),e.get('message_type')=='private',character=session['state']['character'],visual_requested=explicit,cached_only=split),8)
+            extra=await asyncio.wait_for(self.context.build(self.http,str(e['user_id']),text,now(),e.get('message_type')=='private',character=session['state']['character'],visual_requested=explicit,cached_only=split,history=model_history),8)
         except (asyncio.TimeoutError,aiohttp.ClientError,OSError,ValueError) as exc:
             extra='可选背景资料暂不可用，不推断实时天气、日程或笔记。'
             self.delivery_metric('context_unavailable',CURRENT.get(),reason='CONTEXT_UNAVAILABLE',error=type(exc).__name__)
@@ -1143,7 +1174,9 @@ class Bot:
                 extra+='\n上一轮尚未发送的重要内容（不是已说过的话）：'+json.dumps(pending,ensure_ascii=False)+'。根据用户新消息重组，输出carry_resolution:included/irrelevant/deferred；不可把旧内容原样全发完。'
             else:session.pop('pending_essential',None)
         except (KeyError,ValueError,TypeError):session.pop('pending_essential',None)
-        extra += '\n'+image_director.scene_context(session,include_plan=explicit and local_visual is None)+'\n'+social_reasoning.context(session)
+        if explicit or re.search(r'图|照片|画画|镜头|换装|穿什么|在哪',text):
+            extra += '\n'+image_director.scene_context(session,include_plan=explicit and local_visual is None)
+        extra += '\n'+social_reasoning.context(session)
         positions=delivery_state.positions_context(session,text)
         if positions:extra+='\n此前已实际说过的相关观点，可随新依据更正，不当作用户事实：'+json.dumps(positions,ensure_ascii=False)
         self.delivery_metric('context_ready',CURRENT.get(),context_preparation_ms=round((time.monotonic()-context_started)*1000))
@@ -1167,8 +1200,15 @@ class Bot:
         fixed_visual = cache_context(session) if explicit and local_visual is None else ''
         if fixed_visual:
             extra += '\n'+fixed_visual+'\n仅在同一套服装或同一地点时沿用；用户明确换装、换地点时重新描述对应部分。'
-        tone = self.context.life.mood(str(e['user_id']),{},now()) if e.get('message_type')=='private' else '自然平稳，跟随用户话题。'
-        dialogue_plan=dialogue_planner.plan(text,model_history,session.get('dialogue_state'))
+        try:
+            tone = self.context.life.mood(str(e['user_id']),{},now()) if e.get('message_type')=='private' else '自然平稳，跟随用户话题。'
+        except Exception as exc:
+            log.warning('读取情绪失败 (%s)', type(exc).__name__)
+            tone = '自然平稳，跟随用户话题。'
+        from companion import expression_hint
+        tone += expression_hint(session,text,now())
+        dialogue_plan=dialogue_planner.plan(text,model_history,session.get('dialogue_state'),relation=depth.get('relation'),tone=tone,confirmed_boundary=social_reasoning.boundary_blocks(session,text,now()))
+        depth={**depth, 'reply_direction':dialogue_plan.prompt()}
         # Response policy is inserted as an instruction at the model boundary.
         snapshot=ContextSnapshot.capture(key,input_id,session,model_history,extra,session.get('dialogue_state') or depth['state'],
             capabilities=image_mode.effective(preferences.load()),dialogue_plan=vars(dialogue_plan))
@@ -1186,12 +1226,17 @@ class Bot:
                 self.delivery_metric('chat_analysis_failed',CURRENT.get(),error=type(exc).__name__)
             else:
                 self.delivery_metric('chat_analysis_complete',CURRENT.get(),analysis_ms=round((time.monotonic()-model_started)*1000))
+                session['input_analysis'] = {'input_id': input_id, 'at': received_at,
+                    'topic': (preparation or {}).get('topic'), 'emotion': analysis.get('emotion_state'),
+                    'intent': analysis.get('user_intent')}
+                self.store.save(key, session)
                 if preparation:
                     extra+='\n本轮回复前整理的资料，以用户原话和已确认记录为准，直接写正文：'+json.dumps(preparation,ensure_ascii=False)
             self.scheduler.check(CURRENT.get())
         visual_call=explicit and local_visual is None
         profile='front' if split and analysis is not None else 'full' if visual_call else 'text'
         data = await deepseek(self.http, frozen['state'], model_history, request, visual_call, context=extra,media=observation,depth=depth,contract_profile=profile,analysis=analysis)
+        self.scheduler.check(CURRENT.get())
         if local_visual:data.update(local_visual)
         if not explicit and image_requests.model_request(text,data):
             explicit=True
@@ -1207,6 +1252,7 @@ class Bot:
         if explicit and data.get('_model_format_error'):
             e['_pending_image_job'].data.update(main_model_format_error=data['_model_format_error'],main_model_response=data.get('_raw_model_response',''))
             e['_pending_image_job'].save()
+        data['_context_snapshot_id'] = snapshot.snapshot_id
         data['_explicit_image_request']=explicit
         data['_visual_context']=bool(explicit or image_requests.latest(session) or image_progress.recent_visual(session.get('history',[]),now()))
         if explicit:
@@ -1234,7 +1280,7 @@ class Bot:
         if e.get('message_type')=='private':
             self.store.effect(self.context.companion.touch,str(e['user_id']),session['state']['character'],now())
             memory_counts={}
-            self.store.effect(self.context.life.record,str(e['user_id']),data.get('memory_updates',[]),text,now(),diagnostics=memory_counts)
+            self.store.effect(self.context.life.record,memory_recall.owner(str(e['user_id']),session['state']['character']),data.get('memory_updates',[]),text,now(),diagnostics=memory_counts,input_id=input_id)
             self.delivery_metric('memory_extraction',CURRENT.get(),memory_extraction=data.get('_memory_extraction',{'status':'missing'}),memory_result=memory_counts,reply_only_recovery=bool(data.get('_text_only_recovery')))
         social_reasoning.remember(session,data,now())
         if observation:session['last_media']={'at':received_at,**observation}
@@ -1268,15 +1314,68 @@ class Bot:
             if not explicit:
                 return
         ticket=CURRENT.get()
-        session['delivery_plan']={'version':ticket.version if ticket else 0,'source':request,'segments':[{'index':i,'text':segment,'priority':plan.get('segment_priority',['optional']*len(plan['segments']))[i],'status':'queued'} for i,segment in enumerate(plan['segments'])]}
-        self.store.save(key,session)
-        for index,segment in enumerate(plan['segments']):
-            self.scheduler.check(CURRENT.get())
-            acknowledgement=await self.send(e,segment)
-            session['delivery_plan']['segments'][index].update(status='sent',qq_result=acknowledgement,at=now().isoformat())
-            session['delivery_receipts']=(session.get('delivery_receipts',[])+[{'version':ticket.version if ticket else 0,'segment':index,'state':'sent','qq_result':acknowledgement,'at':now().isoformat()}])[-50:]
-            self.store.save(key,session)
-            commit(segment,acknowledgement,complete=index==len(plan['segments'])-1)
+        options = turn_taking.config(preferences.load().get('turn_taking'))
+        episode = turn_taking.episode(plan, request, ticket, options, now())
+        episode['input_id'] = input_id
+        episode['ack_fields'] = {field: data[field] for field in
+            ('state','_scene_hair','life_update','affect','carry_resolution') if field in data}
+        episode['affect_user'] = str(e['user_id']) if e.get('message_type') == 'private' else None
+        previous_plan = session.get('delivery_plan', {})
+        if any(s.get('status') in ('unknown','sending') for s in previous_plan.get('segments', [])):
+            session['unknown_deliveries'] = (session.get('unknown_deliveries', []) + [previous_plan])[-50:]
+        session['delivery_plan'] = episode
+        self.store.save(key, session)
+        if ticket:
+            ticket.segment_count = len(episode['segments'])
+
+        for index, item in enumerate(episode['segments']):
+            self.scheduler.check(ticket)
+            segment = item['text']
+            pause = options['natural_pause']
+            if index and options['enabled'] and pause['enabled']:
+                try:
+                    await self.scheduler.wait(ticket, turn_taking.pause_seconds(pause, item['type'], ticket.pace if ticket else 'normal'))
+                except Superseded:
+                    raise
+                except (ValueError, RuntimeError, ArithmeticError) as exc:
+                    self.scheduler.check(ticket)
+                    log.warning('分段停顿异常，合并剩余正文 (%s)', type(exc).__name__)
+                    remainder = episode['segments'][index:]
+                    segment = '\n'.join(s['text'] for s in remainder)
+                    item.update(text=segment, priority='essential' if any(s['priority']=='essential' for s in remainder) else 'optional')
+                    del episode['segments'][index+1:]
+                    session['delivery_plan']['segments'][index:] = [item.copy()]
+                    self.store.save(key, session)
+            reason = turn_taking.omit_reason(item, text, session['pending_turn']['acknowledged_text'], model_history)
+            if reason:
+                session['delivery_plan']['segments'][index].update(status='cancelled', reason=reason)
+                self.store.save(key, session)
+                if index == len(episode['segments'])-1:
+                    session = self.store.finish_delivered_prefix(key, input_id, now())
+                    if episode['affect_user']:
+                        session = self.store.drain_affect(key, self.context.life)
+                continue
+            def dispatch():
+                if now().isoformat() >= episode['expires_at']:
+                    raise Superseded()
+                echo = 'turn:' + item['id']
+                session['delivery_plan']['segments'][index].update(status='sending', echo=echo, dispatched_at=now().isoformat())
+                self.store.save(key, session)
+                return echo
+            try:
+                acknowledgement = await self.send(e, segment, on_dispatch=dispatch)
+            except Superseded:
+                raise
+            except Exception as exc:
+                active = session['delivery_plan']['segments'][index]
+                unknown = active['status'] == 'sending' and getattr(exc, 'code', None) != 'qq_send_rejected'
+                active.update(status='unknown' if unknown else 'failed', reason=type(exc).__name__)
+                turn_taking.settle(session['delivery_plan'], 'send_interrupted')
+                self.store.save(key, session)
+                if unknown:
+                    raise ImageFailure('qq_text_ack_missing', 'send', 'QQ delivery has no confirmed result') from exc
+                raise
+            commit(segment, acknowledgement, complete=index == len(episode['segments'])-1)
             await self.indicate_typing(e,False)
         if plan['mode']=='text' and plan['segments']:
             spoken='\n'.join(session['pending_turn']['acknowledged_text'])
@@ -1475,17 +1574,14 @@ class Bot:
         snapshot['scene_phase']='proposed' if proposed else 'acknowledged'
         snapshot['scene_authorization']=copy.deepcopy(data.get('_scene_authorization',{}))
         snapshot['creative_brief']=copy.deepcopy(data['creative_brief'])
-        visual_hour=snapshot.get('visual_hour',datetime.fromisoformat(snapshot['local_time']).hour)
-        snapshot['setting_tags']=scene_tags(snapshot['setting_tags'],visual_hour,'')
-        snapshot['creative_brief']['environment']=snapshot['setting_tags']
-        snapshot['creative_brief']['atmosphere']=scene_tags(snapshot['creative_brief']['atmosphere'],visual_hour,'')
         if not snapshot['action']:
             data['_image_failure']='missing_english_action'
             if job:job.record('failed',reason='missing_english_action')
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'missing_english_action'});return
-        snapshot['art_style']=art_styles.selected(session)
+        snapshot['art_style']=art_styles.selected(session,snapshot['style'])
         if snapshot['art_style']!='original':
             snapshot['expected_art_style']+='; '+art_styles.STYLES[snapshot['art_style']]['prefix']
+        visual_selector.apply(ROOT,snapshot)
         snapshot['shot_plan']=shot_director.choose(snapshot,text,session.get('shot_history',[])+session.get('shot_attempts',[]))
         snapshot['camera']=snapshot['shot_plan']['tags']
         visual_key=image_director.fingerprint([snapshot['location'],snapshot['outfit'],snapshot['action'],snapshot['camera']])
@@ -1508,6 +1604,8 @@ class Bot:
         else:job=image_director.Job(ROOT/'data'/'image_jobs',snapshot,decision,prompt,self.activity.get(key,0))
         job.data.update(conversation_id=hashlib.sha256(key.encode()).hexdigest()[:12],related_event_id=decision.get('event'),message_version=CURRENT.get().version if CURRENT.get() else None,image_epoch=self.image_epochs.get(key,0))
         if CURRENT.get():job.data.setdefault('input_batch_id',CURRENT.get().input_batch_id)
+        if data.get('_context_snapshot_id'):
+            job.data['context_snapshot_id'] = data['_context_snapshot_id']
         job.data.setdefault('scene_authorization',copy.deepcopy(data.get('_scene_authorization',{})))
         session['last_image_job_id']=job.id
         job.record('accepted',reason=decision.get('reason','accepted'))
@@ -1704,7 +1802,7 @@ class Bot:
                                 'started_at':stamp,'expires_at':candidate['expires_at'],'source':'fictional_routine_enactment','phase':'image_acknowledged'}
                         delivery_state.event(session,'image_acknowledged',now(),image_task_id=job.id if job else None,message_id=acknowledgement.get('message_id'))
                         session['image_events']=[s for s in session.get('image_events',[]) if isinstance(s,str) and s.startswith(stamp[:10])][-9:]+[stamp]
-                        session['drawing_sends']=(session.get('drawing_sends',[])+[{'day':stamp[:10],'at':stamp,'kind':job.data['decision'].get('kind','explicit') if job else 'explicit'}])[-100:]
+                        session['drawing_sends']=(session.get('drawing_sends',[])+[{'day':stamp[:10],'at':stamp,'kind':job.data['decision'].get('kind','explicit') if job else 'explicit', 'initiative':bool(job and job.data.get('initiative')), 'activity':((job.data.get('candidate') or {}).get('character_activity','') if job else '')}])[-100:]
                         if job:
                             shot=job.snapshot
                             session['shot_history']=(session.get('shot_history',[])+[shot_director.history_entry(shot,qa,job.data.get('render_config',{}),job.id)])[-12:]
@@ -1842,6 +1940,10 @@ class Bot:
             self.image_decision_record(key,{**decision,'allowed':False,'reason':'queue_full'});return
         job=image_director.Job(ROOT/'data'/'image_jobs',{'state':copy.deepcopy(session['state'])},decision,'',self.activity.get(key,0))
         job.data.update(conversation_id=candidate['conversation_id'],candidate=candidate,initiative=bool(event.get('_initiative')))
+        visual_context = ContextSnapshot.capture(key, candidate['candidate_id'], session, session['history'],
+            cache_context(session), session.get('dialogue_state', {}), capabilities=image_mode.effective(settings))
+        job.data['parent_context_snapshot_id'] = data.get('_context_snapshot_id')
+        job.data['context_snapshot_id'] = visual_context.snapshot_id
         job.record('planning',reason='candidate_accepted_for_planning')
         self.image_planning[job.id]=(key,asyncio.current_task())
         session['candidate_plans']=(session.get('candidate_plans',[])+[{'day':now().date().isoformat(),'kind':candidate['source_type']}])[-100:]
@@ -1854,10 +1956,12 @@ class Bot:
             request='为这个已审核的候选准备插画，保持保存的身份、服装和地点。活动是虚拟生活演出，若日程与地点冲突就不画，不编造出行。输出完整visual_scene和visual_tags、贴合事件的action/props/camera；可给image_caption一条符合人设的短分享文字，不声称是相机实拍。'+json.dumps(candidate,ensure_ascii=False)
             request+=' 最近成功图片的动作/构图（避免连续雷同）：'+json.dumps(session.get('recent_visuals',[])[-3:],ensure_ascii=False)
             try:
-                data=await deepseek(self.http,session['state'],session['history'],request,True,context=cache_context(session))
+                inputs = visual_context.slice()
+                data=await deepseek(self.http,inputs['state'],inputs['history'],request,True,context=inputs['context'])
             except Exception as exc:
                 job.record('failed',reason='visual_planning_failed',error=type(exc).__name__)
                 self.image_decision_record(key,{**decision,'allowed':False,'status':'failed','reason':'visual_planning_failed','error':type(exc).__name__});return
+        data['_context_snapshot_id'] = visual_context.snapshot_id
         live=self.store.get(key)
         import social_reasoning
         if image_requests.latest(live) and image_progress.snapshot(ROOT,live,key,now(),self.started_at)['status'] in image_progress.ACTIVE|{'interrupted','outcome_unknown','recovered_output','not_started'}:
@@ -1908,7 +2012,7 @@ class Bot:
             event=self.context.routine.current_event(routine_user,current)
             import social_reasoning
             candidate=image_candidates.life(key,session,current,event)
-            if not candidate or social_reasoning.boundary_blocks(session,candidate.character_activity,current):continue
+            if not candidate or not initiative.worthwhile(session,candidate.character_activity) or social_reasoning.boundary_blocks(session,candidate.character_activity,current):continue
             session['initiative_at']=current.isoformat()
             session['initiative_attempts']=(session.get('initiative_attempts',[])+[{'day':current.date().isoformat(),'event':candidate.related_event_id}])[-20:]
             self.store.save(key,session)
@@ -2002,6 +2106,9 @@ class Bot:
                             future = self.pending[echo]
                             if not future.done():
                                 future.set_result(e)
+                            continue
+                        if isinstance(echo, str) and echo.startswith('turn:'):
+                            self.store.late_receipt(echo, e, now())
                             continue
                         self.dispatch_inbound(e, ws)
                     self.connection_warning('closed_'+str(ws.close_code),delay)

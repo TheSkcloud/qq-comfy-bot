@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 import re
 import sqlite3
+import memory_recall
 
 DIMENSIONS = ('affinity','trust','joy','anger','sadness','stress','curiosity','calm')
 BASE = dict(affinity=25,trust=30,joy=0,anger=0,sadness=0,stress=0,curiosity=15,calm=40)
@@ -30,6 +31,10 @@ class Life:
             db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY,user TEXT,at TEXT,kind TEXT,value TEXT,previous TEXT,evidence TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS committed_affect (event_id TEXT PRIMARY KEY, user TEXT, at TEXT)')
             db.execute('CREATE TABLE IF NOT EXISTS feelings (user TEXT PRIMARY KEY,data TEXT,updated TEXT)')
+            db.execute('CREATE INDEX IF NOT EXISTS event_lookup ON events(user,value,id)')
+            memory_recall.initialize(db)
+            if 'input_id' not in {r[1] for r in db.execute('PRAGMA table_info(events)')}:
+                db.execute('ALTER TABLE events ADD COLUMN input_id TEXT')
         (self.root/'conversation_journal.jsonl').touch(exist_ok=True)
 
     @contextmanager
@@ -41,7 +46,7 @@ class Life:
         finally:
             connection.close()
 
-    def record(self,user,updates,message,current,diagnostics=None):
+    def record(self,user,updates,message,current,diagnostics=None,input_id=None):
         stamp=current.isoformat(timespec='hours')
         accepted=[]
         diagnostics=diagnostics if diagnostics is not None else {}
@@ -51,6 +56,9 @@ class Life:
             diagnostics['rejected']+=1
             diagnostics['reasons'][reason]=diagnostics['reasons'].get(reason,0)+1
         for item in updates[:4]:
+            if re.search(r'(?:别|不要|不用)(?:把.{0,12})?(?:记住|记录|记下|记)',message):
+                reject('user_declined_memory')
+                continue
             if not isinstance(item,dict):reject('invalid_item');continue
             kind=item.get('kind');value=str(item.get('value','')).strip()[:160];evidence=str(item.get('evidence','')).strip()
             if re.search(r'假如|假设|开玩笑|模仿|反话|逗你',message):
@@ -96,21 +104,34 @@ class Life:
                 reject('sensitive_value')
                 continue
             slot=kind if kind in ('location','activity') else kind+':'+hashlib.sha256(value.encode()).hexdigest()[:12]
+            current_slot = re.match(r'^我(?:的|现在用的|目前用的)?(耳机|手机|电脑)(?:现在|目前)?(?:是|换成了?|换到了?)', evidence)
+            if kind=='basic_fact' and current_slot and not re.search(r'想|如果|打算|以前|之前|曾经',evidence):
+                slot = 'basic_fact:current:'+current_slot[1]
             with self.db() as db:
                 row=db.execute('SELECT value FROM facts WHERE user=? AND kind=?',(user,slot)).fetchone()
                 previous=row[0] if row else None
                 if previous==value:
                     reject('unchanged')
                     continue
-                db.execute('INSERT OR REPLACE INTO facts VALUES (?,?,?,?)',(user,slot,value,stamp))
-                db.execute('INSERT INTO events(user,at,kind,value,previous,evidence) VALUES (?,?,?,?,?,?)',
-                           (user,stamp,kind,value,previous,redact(evidence)[:180]))
+                db.execute('INSERT INTO facts VALUES (?,?,?,?) ON CONFLICT(user,kind) DO UPDATE SET value=excluded.value,updated=excluded.updated',(user,slot,value,stamp))
+                db.execute('INSERT INTO events(user,at,kind,value,previous,evidence,input_id) VALUES (?,?,?,?,?,?,?)',
+                           (user,stamp,kind,value,previous,redact(evidence)[:180],input_id))
             event=dict(at=stamp,user=user,kind=kind,value=value,previous=previous,evidence=redact(evidence)[:180])
             accepted.append(event)
             diagnostics['accepted']+=1
             with (self.root/'conversation_journal.jsonl').open('a',encoding='utf-8') as archive:
                 archive.write(json.dumps(event,ensure_ascii=False)+'\n')
         return accepted
+
+    def capture_before_trim(self, user, text, current, input_id):
+        # Keep only unambiguous first-person statements before bounded history is pruned.
+        if re.search(r'别记|不要记|不用记|假设|开玩笑|如果|据说|他说|她说|听说', text):
+            return
+        if not re.fullmatch(r'我(?:一直|更|最)?(?:不喜欢|喜欢|讨厌)[^“”「」？！?，,。；\n]{1,100}[。！]?', text):
+            return
+        evidence = text.rstrip('。！')
+        self.record(user, [{'kind':'preference','value':evidence,'evidence':evidence}],
+                    text, current, input_id=input_id)
 
     def facts(self,user):
         with self.db() as db:
@@ -125,33 +146,8 @@ class Life:
     def profile(self,user):
         return '；'.join(f"{x['kind']}={x['value']}" for x in self.facts(user))[:450]
 
-    def recall(self, user, message, current, limit=6):
-        """Retrieve relevant facts with their dates, never present stale activity as current."""
-        terms = set(re.findall(r'[a-zA-Z]{3,}', message.lower()))
-        terms.update(message[i:i+2] for i in range(len(message)-1)
-                     if all('\u4e00' <= char <= '\u9fff' for char in message[i:i+2]))
-        terms -= {'今天', '现在', '这个', '那个', '什么', '怎么', '一下', '可以', '我的'}
-        ranked = []
-        for fact in self.facts(user):
-            try:
-                at = datetime.fromisoformat(fact['updated'])
-                hours = max(0, (current-at).total_seconds()/3600)
-            except (ValueError, TypeError):
-                hours = 99999
-            kind, value = fact['kind'], fact['value']
-            overlap = sum(term in value.lower() for term in terms)
-            if kind == 'activity' and hours > 6:
-                continue
-            if kind == 'plan' and hours > 7*24 and not overlap:
-                continue
-            if not overlap and kind in ('location','activity','plan'):
-                continue
-            score = overlap*10 + (3 if kind in ('preference', 'basic_fact') else 1) + 1/(1+hours)
-            label = '当时的计划，未确认完成或仍有效' if kind == 'plan' else (
-                '最后提到的地点，当前未确认' if kind == 'location' else '用户当时明确提到')
-            ranked.append((score, f"[{fact['updated']}] {label}：{value}"))
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        return '\n'.join(value for score, value in ranked[:limit])[:1100]
+    def recall(self, user, message, current, limit=6, history=()):
+        return memory_recall.search(self, user, message, current, limit, history)
 
     def forget(self, user, value):
         """Explicit exact-value removal; unrelated memories and users are untouched."""
@@ -192,8 +188,10 @@ class Life:
                 return False
             kind=row[0].split(':')[0]
             slot=kind if kind in ('location','activity') else kind+':'+hashlib.sha256(new.encode()).hexdigest()[:12]
+            if row[0].startswith('basic_fact:current:'):
+                slot = row[0]
             db.execute('DELETE FROM facts WHERE user=? AND kind=?',(user,row[0]))
-            db.execute('INSERT OR REPLACE INTO facts VALUES (?,?,?,?)',(user,slot,new,stamp))
+            db.execute('INSERT INTO facts VALUES (?,?,?,?) ON CONFLICT(user,kind) DO UPDATE SET value=excluded.value,updated=excluded.updated',(user,slot,new,stamp))
             evidence='用户明确更正：'+new
             db.execute('INSERT INTO events(user,at,kind,value,previous,evidence) VALUES (?,?,?,?,?,?)',
                        (user,stamp,kind,new,old,evidence))
@@ -232,4 +230,9 @@ class Life:
         styles={'neutral':'自然平稳，跟随用户话题。','angry':'语气稍直接但仍尊重用户，不挖苦、威胁、冷暴力或拒绝合理帮助。',
                 'sad':'语气稍低缓，不要求用户负责或安慰你。','joyful':'语气更轻快，但不夸张刷屏。','tense':'句子稍简短，仍耐心完成交流。'}
         # Short-term affect must not override the persistent relationship stage.
-        return styles[mode]
+        style = styles[mode]
+        if values['curiosity'] >= BASE['curiosity']+3 and values['trust'] >= BASE['trust']+2:
+            style += '可以接续对方提过的兴趣，但只问与当前内容相关的事。'
+        if values['stress'] >= BASE['stress']+3 and values['anger'] >= BASE['anger']+2:
+            style += '想收住话头时可以简短表态，不用贬低对方。'
+        return style

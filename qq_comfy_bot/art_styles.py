@@ -10,6 +10,7 @@ def composition_prompt(text):
     return SINGLE_FRAME+', '+', '.join(parts)
 
 DEFAULT = 'original'
+LIFE_DEFAULT = 'handdrawn'
 STYLES = {
     'original': {'name':'原版', 'description':'原有 H 画风',
         'prefix':'masterpiece, best quality, very aesthetic, highres, newest, detailed illustration, hand-drawn 2d anime illustration, soft shading, delicate colored outlines, (@ningen mame:1.9), (@meme50:2.1), (@rurudo:1.9), (@piratescat01:1.6)'},
@@ -17,18 +18,18 @@ STYLES = {
         'prefix':'best quality, excellent, 2d anime illustration, @92m',
         'loras':[('Blue_archive_style.safetensors',.6),('bluearchivefull1-000006.safetensors',.9),('BadAnatomy.safetensors',-.75)]},
     'handdrawn': {'name':'手绘', 'description':'带手绘质感的二维上色（参考 00045）',
-        'prefix':'best quality, excellent, 2d anime illustration, hand-drawn, @92m',
+        'prefix':'best quality, excellent, masterpiece, 2d anime illustration, hand-drawn, @92m',
         'loras':[('Blue_archive_style.safetensors',1.),('Hand-drawnfeel-000018.safetensors',1.),('BadAnatomy.safetensors',-.5)]},
 }
-ALIASES = {**{k:k for k in STYLES}, '原版':'original','默认':'original','H':'original','h':'original',
-           '赛璐璐':'cel','清透赛璐璐':'cel','清透':'cel','手绘':'handdrawn','手绘柔光':'handdrawn'}
+ALIASES = {**{k:k for k in STYLES}, '原版':'original','默认':LIFE_DEFAULT,'H':'original','h':'original',
+           '赛璐珞':'cel','赛璐璐':'cel','清透赛璐璐':'cel','清透':'cel','手绘':'handdrawn','手绘柔光':'handdrawn'}
 
 def resolve(value):
     try:return ALIASES[value.strip()]
     except (KeyError,AttributeError):raise ValueError('未知画风。可选：原版、赛璐璐、手绘。') from None
 
-def selected(session):
-    return resolve(session.get('art_style',DEFAULT))
+def selected(session,mode=None):
+    return resolve(session.get('art_style',LIFE_DEFAULT if mode=='life' else DEFAULT))
 
 def describe(value):
     return STYLES[resolve(value)]['name']
@@ -39,7 +40,7 @@ def menu(value=DEFAULT):
 def settings(value):
     value=resolve(value)
     if value==DEFAULT:return {}
-    return dict(art_style=value,steps=30,cfg=1.6,width=896,height=1152,reference=False,upscale=False,hand_detailer=True)
+    return dict(art_style=value,steps=30,cfg=1.0 if value=='handdrawn' else 1.6,width=896,height=1152,reference=False,upscale=False,hand_detailer=True)
 
 def node_id(graph, class_type):
     matches=[key for key,node in graph.items() if node.get('class_type')==class_type]

@@ -5,6 +5,7 @@ import os
 import re
 import time
 
+import memory_recall
 from life import Life, redact
 from weather import DailyWeather
 from daily_routine import DailyRoutine
@@ -79,7 +80,7 @@ class ContextEngine:
                 cache.write_text(json.dumps({'date':day,'traits':[],'status':'unavailable','error':type(exc).__name__}),encoding='utf-8')
                 return []
 
-    async def build(self,http,user,message,current,private=True,character='',visual_requested=False,cached_only=False):
+    async def build(self,http,user,message,current,private=True,character='',visual_requested=False,cached_only=False,history=()):
         if http is None or os.getenv('CONTEXT_ENABLED','1')=='0':
             return ''
         pieces=[]
@@ -105,7 +106,7 @@ class ContextEngine:
         if private and is_owner(user) and schedule.PATH.is_file() and any(k in message for k in ('课','学校','安排','日程','考试','上学','作业')):
             pieces.append(schedule.context(current))
         if private:
-            profile=self.life.recall(user,message,current)
+            profile=await asyncio.to_thread(self.life.recall, memory_recall.owner(user, character), message, current, 6, history)
             if profile:
                 memory='用户明确说过的事实（虚拟场景不等于用户位置）：'+profile
                 if cached_only:pieces.insert(0,memory)

@@ -31,8 +31,12 @@ def decorate(plan,value=None):
     attitude=value.get('attitude','neutral')
     plan.update(length=length if length in LENGTHS else 'short',attitude=attitude if attitude in ATTITUDES else 'neutral',
                 attitude_reason=str(value.get('attitude_reason',''))[:180])
-    if plan['mode']=='text' and len(plan['segments'])==1:
-        plan['segments']=split_prose(plan['segments'][0])
+    from turn_taking import BEHAVIORS
+    types = value.get('segment_types')
+    if types is not None:
+        if not isinstance(types, list) or len(types) != len(plan['segments']) or not all(isinstance(t, str) and t in BEHAVIORS for t in types):
+            raise ValueError('Invalid segment_types')
+        plan['segment_types'] = types
     priorities=value.get('segment_priority',[])
     plan['segment_priority']=[priorities[i] if isinstance(priorities,list) and i<len(priorities) and priorities[i] in ('essential','optional') else ('essential' if plan['length']=='extended' else 'optional') for i in range(len(plan['segments']))]
     return plan

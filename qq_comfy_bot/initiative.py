@@ -19,7 +19,7 @@ def eligible(session, current, settings, connected=True):
             return False
         if session.get('busy_until') and datetime.fromisoformat(session['busy_until'])>current:
             return False
-        if session.get('initiative_at') and (current-datetime.fromisoformat(session['initiative_at'])).total_seconds()<cfg['life_min_interval_minutes']*60:
+        if session.get('initiative_at') and (current-datetime.fromisoformat(session['initiative_at'])).total_seconds()<cfg['life_min_interval_minutes']*60*(1 + .5*min(4,unanswered(session))):
             return False
     except (KeyError,ValueError,TypeError):
         return False
@@ -28,3 +28,24 @@ def eligible(session, current, settings, connected=True):
     if sum(a.get('day')==local.date().isoformat() and a.get('kind')!='explicit' for a in session.get('drawing_sends',[]))>=cfg['daily_budget']:
         return False
     return True
+
+
+def unanswered(session):
+    last_user = session.get('last_user_at', '')
+    return sum(bool(item.get('initiative')) and item.get('at','') > last_user
+               for item in session.get('drawing_sends', []))
+
+
+def worthwhile(session, activity):
+    count = unanswered(session)
+    if not count:
+        return True
+    recent = [s for s in session.get('drawing_sends', []) if s.get('initiative')]
+    if recent and recent[-1].get('activity') == activity:
+        return False
+    if count < 2:
+        return True
+    import re
+    from memory_recall import terms
+    previous = next((m['content'] for m in reversed(session.get('history', [])) if m.get('role')=='user'), '')
+    return bool(terms(activity) & terms(previous) or re.search(r'比赛|演出|庆祝|纪念|完成|生日',activity))

@@ -158,7 +158,10 @@ class EntryTests(unittest.IsolatedAsyncioTestCase):
             await self.instance.handle(self.event,self.key,SELFIE);await self.finish()
         job=json.loads(next((self.root/'data/image_jobs').glob('*/job.json')).read_text(encoding='utf-8'))
         self.assertEqual(job['snapshot']['outfit'],'淡蓝色长裙、拖鞋和踩脚袜')
-        self.assertIn('light blue long dress',job['prompt']);self.assertIn('floor-to-ceiling window',job['prompt'])
+        self.assertIn('light blue long dress',job['snapshot']['outfit_tags'])
+        portrait=job['snapshot']['shot_plan']['size'] in ('medium','close','extreme_close')
+        self.assertIn('light blue dress bodice' if portrait else 'light blue long dress',job['prompt'])
+        self.assertIn('floor-to-ceiling window',job['prompt'])
         self.assertFalse(bot.image_director.user_transition('clothing','我穿着蓝裙，你觉得怎么样？'))
 
     async def test_rejected_background_candidate_has_no_started_flag_or_delivery_promise(self):

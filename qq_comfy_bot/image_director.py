@@ -328,7 +328,8 @@ class Job:
 async def inspect_image(http,content,snapshot,root,settings):
     import image_qa_cache
     if not isinstance(snapshot,dict):return {'pass':False,'status':'invalid_snapshot'}
-    if not config(settings)['qa_enabled']:return {'pass':True,'status':'review_bypassed','reviewed':False,'usage':{'total_tokens':0}}
+    if not config(settings)['qa_enabled']:
+        return await _inspect_image_once(http,content,snapshot,root,settings)
     identifier,digest,target_digest=image_qa_cache.key(content,snapshot)
     async with image_qa_cache.lock(root,identifier):
         saved=image_qa_cache.read(root,identifier,digest,target_digest)
@@ -348,6 +349,14 @@ async def _inspect_image_once(http,content,snapshot,root,settings):
         width,height=image.size
         if min(width,height)<256 or max(ImageStat.Stat(image).stddev)<3:
             return {'pass':False,'status':'invalid_pixels','size':[width,height]}
+        band=height//5
+        top=ImageStat.Stat(image.crop((0,0,width,band)))
+        bottom=ImageStat.Stat(image.crop((0,height-band,width,height)))
+        center=ImageStat.Stat(image.crop((0,height//3,width,2*height//3)))
+        if (max(top.stddev+bottom.stddev)<4
+            and max(abs(a-b) for a,b in zip(top.mean,bottom.mean))<18
+            and max(center.stddev)>18):
+            return {'pass':False,'status':'excessive_blank_borders','size':[width,height]}
     except Exception:
         return {'pass':False,'status':'decode_failed'}
     if not cfg['qa_enabled']:
@@ -376,6 +385,7 @@ async def _inspect_image_once(http,content,snapshot,root,settings):
     body['messages'][0]['content']+=' visual_overrides 中列出的临时画面设定以 render_target 对应字段为准，不用长期 state 覆盖；local_routine 的服装地点以快照 outfit/location 为准。若画面出现 visual_exclusions 中明确排除的物件，判为 scene/major。'
     if 'visual_hour' in snapshot:body['messages'][0]['content']+=' 画中时段以 visual_hour 为准，local_time 记录的是创建任务的真实时间。'
     body['messages'][0]['content']+=' 景别按像素判断：extreme_wide为人物很小、环境占主导；wide为完整人物加较大环境；full必须从头到脚完整可见，坐姿也不能缺脚；medium为胸腰到头部；close为脸肩近景；detail为手或道具等局部主体。不要因计划写full就把缺脚的半身画填为full。'
+    body['messages'][0]['content']+=' 单独给 aesthetics 对象，用简短具体的文字描述 composition、lighting、materials、expressiveness。此对象仅供美术诊断，不因主观美感影响 pass 或技术布尔项。有清楚可辨的眼睛时，按角色身份核对可见眼色，区分环境反光和真实冲突。'
     url=os.getenv('DEEPSEEK_BASE_URL','https://api.deepseek.com').rstrip('/')+'/chat/completions'
     try:
         async with http.post(url,json=body,headers={'Authorization':'Bearer '+os.environ['DEEPSEEK_API_KEY']},timeout=aiohttp.ClientTimeout(total=25)) as r:
@@ -400,6 +410,10 @@ async def _inspect_image_once(http,content,snapshot,root,settings):
         if locked and (not isinstance(actual,dict) or any(actual.get(k)!=v for k,v in locked.items())):
             good=False
             result['shot_constraint_mismatch']=True
+        aesthetics=result.pop('aesthetics',None)
+        if isinstance(aesthetics,dict):
+            result['aesthetics']={k:aesthetics[k].strip()[:240] for k in ('composition','lighting','materials','expressiveness')
+                                  if isinstance(aesthetics.get(k),str) and aesthetics[k].strip()}
         return {**result,'pass':good,'status':'checked','size':[width,height],'usage':raw.get('usage')}
     except (aiohttp.ClientError,asyncio.TimeoutError,ValueError,KeyError,TypeError,IndexError) as exc:
         degraded=cfg['qa_unavailable_policy']=='pixels_only' and snapshot.get('request_kind')=='explicit'
@@ -407,6 +421,7 @@ async def _inspect_image_once(http,content,snapshot,root,settings):
 
 
 def quality_notice(status):
-    return {'qa_daily_budget_exhausted':'今天的图片检查额度用完了，这张先留在本地。',
+    return {'excessive_blank_borders':'这张的画面被压成一条，先留在本地。',
+            'qa_daily_budget_exhausted':'今天的图片检查额度用完了，这张先留在本地。',
             'semantic_check_disabled':'图片检查目前关闭，这张先不发。',
             'vision_failed':'这次没能完成图片检查，先不发。'}.get(status,'这张画面有些不对，先不发了。')

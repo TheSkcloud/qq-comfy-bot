@@ -1,4 +1,5 @@
 import json
+import turn_taking
 from pathlib import Path
 
 PATH = Path(__file__).with_name('preferences.json')
@@ -13,6 +14,7 @@ def load():
         result['drawing'] = config(result.get('drawing'))
         from reply_scheduler import timing_config
         result['reply_timing']=timing_config(result.get('reply_timing'))
+        result['turn_taking'] = turn_taking.config(result.get('turn_taking'))
         return result
     except (OSError, ValueError):
         from image_director import config
@@ -27,6 +29,11 @@ def save(values):
     elif 'spontaneous_images' in values and previous.get('capabilities',{}).get('image'):
         values['capabilities']={**previous['capabilities'],'image':'AUTO' if values['spontaneous_images'] else 'MANUAL'}
     drawing={**previous.get('drawing',{}),**values.get('drawing',{})} if isinstance(values.get('drawing',{}),dict) else values.get('drawing')
+    if 'turn_taking' in values:
+        options = {**previous.get('turn_taking', {})}
+        for name, value in values['turn_taking'].items():
+            options[name] = {**options.get(name, {}), **value} if isinstance(value, dict) else value
+        values['turn_taking'] = options
     values = {**previous, **values, 'drawing':drawing}
     mode = values.get('romance_mode', 'slow')
     if mode not in ('slow', 'friends', 'partner'):
@@ -45,6 +52,7 @@ def save(values):
     from reply_scheduler import timing_config
     clean['reply_timing']=timing_config(values.get('reply_timing'))
     clean['thinking_after_substantive_turns']=max(1,min(20,int(values.get('thinking_after_substantive_turns',4))))
+    clean['turn_taking'] = turn_taking.config(values.get('turn_taking'))
     temp = PATH.with_suffix('.tmp')
     temp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding='utf-8')
     temp.replace(PATH)
